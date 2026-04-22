@@ -2,12 +2,19 @@
 
 Builds the Telegram ``Application``, registers handlers, starts the
 APScheduler daily brief, and begins polling. Uses python-telegram-bot v22
-(async). Shuts down cleanly on Ctrl+C — ``post_shutdown`` stops the
-scheduler so no threads or asyncio tasks are orphaned.
+(async).
+
+Shutdown signals: PTB's ``run_polling`` installs handlers for SIGINT, SIGTERM,
+and SIGABRT by default on POSIX (Windows gets SIGINT only, since the OS lacks
+the others). SIGTERM is what Railway sends on redeploy/restart, so graceful
+cleanup — including the ``post_shutdown`` hook that stops the scheduler —
+runs automatically without any explicit signal wiring.
 """
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 
 from telegram.ext import (
     Application,
@@ -61,6 +68,33 @@ def _configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # APScheduler is chatty at INFO during job-missed scenarios; keep it readable.
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
+
+def _get_build_identifier() -> str:
+    """Return a short identifier for the running build, for startup logs.
+
+    Order of precedence:
+      1. ``RAILWAY_GIT_COMMIT_SHA`` env var (set automatically on Railway builds),
+         truncated to 7 chars.
+      2. Local ``git rev-parse --short HEAD`` if a git repo is available.
+      3. The string ``'unknown'`` — should never hit in normal dev/deploy.
+    """
+    railway_sha = os.getenv("RAILWAY_GIT_COMMIT_SHA")
+    if railway_sha:
+        return railway_sha[:7]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
 
 
 async def _post_init(application: Application) -> None:
@@ -126,7 +160,9 @@ def main() -> None:
     # handlers — logs only, never replies, to avoid double-messaging.
     application.add_error_handler(error_handler)
 
-    logger.info("Task-Bot starting (polling mode)")
+    logger.info(
+        "Task-Bot starting (polling mode, build=%s)", _get_build_identifier()
+    )
     try:
         application.run_polling()
     except KeyboardInterrupt:

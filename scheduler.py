@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from telegram.constants import ParseMode
 from telegram.ext import Application
 
@@ -39,6 +40,8 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent
 _LAST_BRIEF_FILE: Path = _PROJECT_ROOT / "data" / "last_brief.txt"
 
 _JOB_ID: str = "morning_brief"
+_HEARTBEAT_JOB_ID: str = "heartbeat"
+_HEARTBEAT_INTERVAL_MINUTES: int = 10
 _UPCOMING_WINDOW_DAYS: int = 14
 _UPCOMING_LIMIT: int = 3
 
@@ -185,12 +188,24 @@ async def catch_up_missed_brief(application: Application) -> None:
     await send_morning_brief(application)
 
 
-def build_scheduler(application: Application) -> AsyncIOScheduler:
-    """Construct the AsyncIOScheduler with the daily brief job installed.
+async def _log_heartbeat() -> None:
+    """Emit a periodic 'alive' log line for deployed-bot liveness checks.
 
-    The caller is responsible for ``start()`` and ``shutdown()``. ``misfire_grace_time``
-    is set to an hour so that if the bot was paused at the scheduled moment
-    (e.g. laptop sleep) but wakes within an hour, the job still fires.
+    With the bot running as a Railway worker there is no public HTTP endpoint
+    to poll, so the log stream is the health signal. A steady ``heartbeat:
+    alive`` every ``_HEARTBEAT_INTERVAL_MINUTES`` means the asyncio loop is
+    running and the scheduler is servicing jobs.
+    """
+    logger.info("heartbeat: alive")
+
+
+def build_scheduler(application: Application) -> AsyncIOScheduler:
+    """Construct the AsyncIOScheduler with the daily brief and heartbeat jobs.
+
+    The caller is responsible for ``start()`` and ``shutdown()``.
+    ``misfire_grace_time`` on the brief is set to an hour so that if the bot
+    was paused at the scheduled moment (e.g. laptop sleep, Railway restart)
+    but wakes within an hour, the morning brief still fires.
     """
     tz = _resolve_timezone()
     scheduler = AsyncIOScheduler(timezone=tz)
@@ -203,5 +218,11 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
         id=_JOB_ID,
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _log_heartbeat,
+        trigger=IntervalTrigger(minutes=_HEARTBEAT_INTERVAL_MINUTES),
+        id=_HEARTBEAT_JOB_ID,
+        replace_existing=True,
     )
     return scheduler
