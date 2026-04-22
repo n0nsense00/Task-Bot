@@ -49,6 +49,7 @@ CMD_ADD: str = "add"
 CMD_DONE: str = "done"
 CMD_DELETE: str = "delete"
 CMD_CANCEL: str = "cancel"
+CMD_BRIEF: str = "brief"
 
 # ----------------------------------------------------------------------------
 # Academic calendar
@@ -71,3 +72,17 @@ def get_current_week() -> int:
     if days_elapsed < 0:
         return 0
     return (days_elapsed // 7) + 1
+
+
+# ----------------------------------------------------------------------------
+# Scheduler
+# ----------------------------------------------------------------------------
+# IANA timezone name used for the daily morning brief. Override via .env if
+# you're not in Singapore; leave unset to use the default.
+TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Singapore")
+
+# Daily morning brief time, in TIMEZONE. Change and restart the bot to shift
+# the delivery hour — handy for testing (e.g. set BRIEF_HOUR to your current
+# hour plus one minute in BRIEF_MINUTE to see the cron fire in real time).
+BRIEF_HOUR: int = 8
+BRIEF_MINUTE: int = 0

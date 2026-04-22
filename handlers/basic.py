@@ -31,6 +31,7 @@ _HELP_MESSAGE = (
     "• /today — tasks due today, grouped by type\n"
     "• /week — this week's lectures + next week's tutorials\n"
     "• /semester — midterms and finals, chronological\n"
+    "• /brief — send the morning brief now (auto-sent daily at 08:00)\n"
     "• /add — add a new task (interactive, step-by-step)\n"
     "• /done &lt;id&gt; — mark a task as completed\n"
     "• /delete &lt;id&gt; — delete a task (confirmation required)\n"
