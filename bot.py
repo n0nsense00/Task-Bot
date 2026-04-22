@@ -10,6 +10,7 @@ import logging
 from telegram.ext import Application, CommandHandler
 
 from config import CMD_HELP, CMD_START, TELEGRAM_BOT_TOKEN
+from database.db import init_db
 from handlers.basic import help_command, start
 
 
@@ -29,6 +30,8 @@ def main() -> None:
     """Build the Application, register handlers, and run until interrupted."""
     _configure_logging()
     logger = logging.getLogger(__name__)
+
+    init_db()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler(CMD_START, start))
