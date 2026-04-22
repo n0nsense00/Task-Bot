@@ -217,3 +217,21 @@ def get_all_pending() -> list[Task]:
                ORDER BY due_date""",
         ).fetchall()
     return [_row_to_task(r) for r in rows]
+
+
+def count_tasks() -> int:
+    """Return the total number of rows in the ``tasks`` table."""
+    with _get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
+    return int(row[0])
+
+
+def delete_all_tasks() -> int:
+    """Delete every row from ``tasks`` and return the number removed.
+
+    Intended for the bulk-replace path in the seeder. Deliberately not wired
+    to any command handler — there is no ``/reset`` in the bot.
+    """
+    with _get_conn() as conn:
+        cur = conn.execute("DELETE FROM tasks")
+        return cur.rowcount
