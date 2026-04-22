@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from utils.auth import authorized_only
@@ -24,7 +25,19 @@ _START_MESSAGE = (
     "Most of these are still being wired up. Stay tuned."
 )
 
-_HELP_MESSAGE = "Help is still a work-in-progress. For now, try /start."
+_HELP_MESSAGE = (
+    "<b>Task-Bot Commands</b>\n"
+    "\n"
+    "• /today — tasks due today, grouped by type\n"
+    "• /week — this week's lectures + next week's tutorials\n"
+    "• /semester — midterms and finals, chronological\n"
+    "• /add — add a new task (interactive, step-by-step)\n"
+    "• /done &lt;id&gt; — mark a task as completed\n"
+    "• /delete &lt;id&gt; — delete a task (confirmation required)\n"
+    "• /cancel — abort the current /add flow\n"
+    "• /help — show this list\n"
+    "• /start — welcome message"
+)
 
 
 @authorized_only
@@ -46,6 +59,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     try:
-        await message.reply_text(_HELP_MESSAGE)
+        await message.reply_text(_HELP_MESSAGE, parse_mode=ParseMode.HTML)
     except Exception:
         logger.exception("Failed to send /help response")

@@ -7,11 +7,37 @@ from __future__ import annotations
 
 import logging
 
-from telegram.ext import Application, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
-from config import CMD_HELP, CMD_START, TELEGRAM_BOT_TOKEN
+from config import (
+    CMD_DELETE,
+    CMD_DONE,
+    CMD_HELP,
+    CMD_SEMESTER,
+    CMD_START,
+    CMD_TODAY,
+    CMD_WEEK,
+    TELEGRAM_BOT_TOKEN,
+)
 from database.db import init_db
+from handlers.add_task import build_add_conversation
 from handlers.basic import help_command, start
+from handlers.errors import error_handler, unknown_command
+from handlers.tasks import (
+    DELETE_CB_PREFIX,
+    delete_callback,
+    delete_task_cmd,
+    done_task_cmd,
+    semester,
+    today,
+    week,
+)
 
 
 def _configure_logging() -> None:
@@ -34,8 +60,31 @@ def main() -> None:
     init_db()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Direct commands first so they take precedence over the catch-all below.
     application.add_handler(CommandHandler(CMD_START, start))
     application.add_handler(CommandHandler(CMD_HELP, help_command))
+    application.add_handler(CommandHandler(CMD_TODAY, today))
+    application.add_handler(CommandHandler(CMD_WEEK, week))
+    application.add_handler(CommandHandler(CMD_SEMESTER, semester))
+    application.add_handler(CommandHandler(CMD_DONE, done_task_cmd))
+    application.add_handler(CommandHandler(CMD_DELETE, delete_task_cmd))
+
+    # Multi-step /add conversation (its own CommandHandler entry point).
+    application.add_handler(build_add_conversation())
+
+    # Inline-keyboard callback for the /delete confirmation.
+    application.add_handler(
+        CallbackQueryHandler(delete_callback, pattern=f"^{DELETE_CB_PREFIX}:")
+    )
+
+    # Catch-all for unrecognised /commands — must come AFTER all known commands,
+    # because PTB runs the first matching handler in group 0.
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # PTB-level safety net for anything that slips past @safe on individual
+    # handlers — logs only, never replies, to avoid double-messaging.
+    application.add_error_handler(error_handler)
 
     logger.info("Task-Bot starting (polling mode)")
     try:
