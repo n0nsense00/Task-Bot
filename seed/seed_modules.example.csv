@@ -1,0 +1,11 @@
+# Task-Bot module list — reference template.
+# Lines starting with '#' are ignored. Blank lines are ignored.
+# Columns (exact order): code, name
+# - code: required (e.g. MH2100, CS2040)
+# - name: optional human-readable name; if blank, the picker shows just the code
+code,name
+MH2100,Calculus III
+MH2200,Probability and Statistics
+MH4300,Numerical Linear Algebra
+MH4302,Stochastic Processes
+CS2040,Data Structures and Algorithms

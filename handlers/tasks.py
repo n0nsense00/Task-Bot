@@ -125,8 +125,10 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for t in items:
             weekday = t.due_date.strftime("%a")
             relative = format_relative_date(t.due_date)
+            time_clause = f" at {esc(t.due_time)}" if t.due_time else ""
             rendered.append(
-                f"• {weekday} {t.due_date.isoformat()} ({relative}) — "
+                f"• {weekday} {t.due_date.isoformat()}{time_clause} "
+                f"({relative}) — "
                 f"{module_prefix(t)}{esc(t.title)}  <code>#{t.id}</code>"
             )
             if t.notes:
@@ -208,9 +210,11 @@ async def semester(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
             relative = days_away_label(t.due_date)
+            time_clause = f" at {t.due_time}" if t.due_time else ""
             rendered.append(
                 f"{status_emoji} {module_prefix(t)}{type_label} — "
-                f"{date_label} ({relative})  <code>#{t.id}</code>"
+                f"{date_label}{time_clause} ({relative})  "
+                f"<code>#{t.id}</code>"
             )
         rendered.append("")
         return rendered

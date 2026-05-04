@@ -35,6 +35,10 @@ class Task:
     ``Task(...)`` calls stay ergonomic. ``id`` is ``None`` until the row is
     inserted; ``created_at`` is set by the DB layer on insert and is ``None``
     on freshly-constructed, not-yet-persisted instances.
+
+    ``due_time`` is an optional ``HH:MM`` string (24-hour). Stored as text in
+    SQLite to keep the schema migration trivial and avoid timezone confusion
+    when combined with ``due_date``. ``None`` means "all day, no specific time".
     """
 
     title: str
@@ -46,3 +50,18 @@ class Task:
     completed: bool = False
     id: Optional[int] = None
     created_at: Optional[datetime] = None
+    due_time: Optional[str] = None
+
+
+@dataclass
+class Module:
+    """A module the user is taking this semester.
+
+    Used to populate the dropdown in /add and /edit when picking a module
+    code. ``name`` is optional; if provided, the picker shows
+    ``CODE · Name`` instead of the bare code for friendlier scanning.
+    Seeded from ``seed/seed_modules.csv`` via :mod:`seed.seed_modules`.
+    """
+
+    code: str
+    name: Optional[str] = None

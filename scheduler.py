@@ -118,9 +118,10 @@ def build_morning_brief() -> str:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
             relative = days_away_label(t.due_date)
+            time_clause = f" at {t.due_time}" if t.due_time else ""
             lines.append(
                 f"• {module_prefix(t)}{type_label} — "
-                f"{date_label} ({relative})  <code>#{t.id}</code>"
+                f"{date_label}{time_clause} ({relative})  <code>#{t.id}</code>"
             )
 
     return "\n".join(lines).rstrip()

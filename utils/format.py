@@ -20,6 +20,7 @@ from database.models import (
     TASK_TYPE_MIDTERM,
     TASK_TYPE_PERSONAL,
     TASK_TYPE_TUTORIAL,
+    Module,
     Task,
 )
 
@@ -83,6 +84,14 @@ CB_EDIT_FIELD: str = "editf"
 CB_EDIT_TYPE_VALUE: str = "edittype"  # edittype:<value>:N
 CB_EDIT_CANCEL: str = "editcancel"
 
+# Module-picker keyboard (used by both /add and /edit module-field flows).
+CB_MODULE: str = "mod"
+# mod:select:<CODE>  → user picked a seeded module
+# mod:other          → user wants to type a custom code
+# mod:skip           → skip module (e.g. personal tasks)
+# mod:clear          → clear the existing module (edit flow only)
+# mod:cancel         → abort the picker
+
 
 # ---------------------------------------------------------------------------
 # Escaping
@@ -96,6 +105,33 @@ def esc(text: str | None) -> str:
 def module_prefix(task: Task) -> str:
     """Return ``[MODULE] `` (with trailing space) or ``""`` when no module_code."""
     return f"[{esc(task.module_code)}] " if task.module_code else ""
+
+
+def module_label(module: Module) -> str:
+    """Render a Module as ``CODE · Name`` if name is set, else just ``CODE``.
+
+    Used in the module-picker keyboard buttons. Limit total length to ~30
+    chars so it doesn't wrap awkwardly on narrow phone screens — Telegram
+    truncates beyond that anyway.
+    """
+    if module.name:
+        label = f"{module.code} · {module.name}"
+        if len(label) > 30:
+            label = label[:29] + "…"
+        return label
+    return module.code
+
+
+def format_due(due: date, due_time: str | None) -> str:
+    """Combine a date and optional time into a single human-readable string.
+
+    Examples: ``today``, ``today at 23:59``, ``in 3 days at 09:00``,
+    ``Wed 7 May``, ``Wed 7 May at 12:00``.
+    """
+    relative = format_relative_date(due)
+    if due_time:
+        return f"{relative} at {due_time}"
+    return relative
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +211,13 @@ def task_status_emoji(task: Task) -> str:
 def format_task_line(task: Task) -> str:
     """One-line render of a task for grouped views.
 
-    Layout: ``• [MODULE] Title  #ID``. Notes (if present) on a second
-    indented italic line.
+    Layout: ``• [MODULE] Title  #ID``, with an italic ``HH:MM`` after the
+    title when ``due_time`` is set. Notes (if present) on a second indented
+    italic line.
     """
+    time_suffix = f" <i>at {esc(task.due_time)}</i>" if task.due_time else ""
     line = (
-        f"• {module_prefix(task)}{esc(task.title)}  "
+        f"• {module_prefix(task)}{esc(task.title)}{time_suffix}  "
         f"<code>#{task.id}</code>"
     )
     if task.notes:
@@ -192,17 +230,18 @@ def format_task_card(task: Task) -> str:
 
     Used for confirmations (delete, edit) and the post-/add summary.
     Includes type emoji, module, title, type label, relative + absolute
-    date, week (if set), notes (if set), and ID.
+    date, time (if set), week (if set), notes (if set), and ID.
     """
     type_emoji = TYPE_EMOJI.get(task.task_type, "•")
     relative = format_relative_date(task.due_date)
     absolute = task.due_date.strftime("%a %d %b %Y")
+    time_clause = f" at {esc(task.due_time)}" if task.due_time else ""
 
     lines: list[str] = [
         f"{type_emoji} {module_prefix(task)}<b>{esc(task.title)}</b>  "
         f"<code>#{task.id}</code>",
         f"<i>{esc(task.task_type.capitalize())} · "
-        f"{relative} ({absolute})</i>",
+        f"{relative} ({absolute}){time_clause}</i>",
     ]
     if task.week_number is not None:
         lines.append(f"<i>Week {task.week_number}</i>")
@@ -326,7 +365,12 @@ def build_delete_confirmation_keyboard(task_id: int) -> InlineKeyboardMarkup:
 
 
 def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
-    """Field picker shown after the user taps 📝 Edit on a task."""
+    """Field picker shown after the user taps 📝 Edit on a task.
+
+    Layout: 2 buttons per row, 4 rows + final Cancel row. Time was added
+    when /add gained an optional time field; keeping all 7 fields editable
+    so /edit doesn't have a partial-coverage gap.
+    """
     return InlineKeyboardMarkup(
         [
             [
@@ -349,15 +393,19 @@ def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    "🕐 Time",
+                    callback_data=f"{CB_EDIT_FIELD}:time:{task_id}",
+                ),
+                InlineKeyboardButton(
                     "📊 Week",
                     callback_data=f"{CB_EDIT_FIELD}:week:{task_id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     "📋 Notes",
                     callback_data=f"{CB_EDIT_FIELD}:notes:{task_id}",
                 ),
-            ],
-            [
                 InlineKeyboardButton(
                     "❌ Cancel",
                     callback_data=f"{CB_EDIT_CANCEL}:{task_id}",
@@ -365,6 +413,59 @@ def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def build_module_keyboard(
+    modules: list[Module],
+    *,
+    include_skip: bool = True,
+    include_clear: bool = False,
+) -> InlineKeyboardMarkup:
+    """Build a module-picker keyboard for /add and /edit module-field flows.
+
+    Layout: one row per seeded module (single button each — module names
+    are too long for two-column reliably). Optional Skip / Clear / Other
+    rows below, then Cancel. Reused by both the /add module step and the
+    edit-task module field.
+
+    ``include_skip``: include a "Skip" button (used in /add for personal tasks).
+    ``include_clear``: include a "Clear current module" button (used in /edit).
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for module in modules:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    module_label(module),
+                    callback_data=f"{CB_MODULE}:select:{module.code}",
+                )
+            ]
+        )
+
+    bottom: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(
+            "Other (type it)…", callback_data=f"{CB_MODULE}:other"
+        ),
+    ]
+    if include_skip:
+        bottom.append(
+            InlineKeyboardButton("Skip", callback_data=f"{CB_MODULE}:skip")
+        )
+    if include_clear:
+        bottom.append(
+            InlineKeyboardButton(
+                "Clear", callback_data=f"{CB_MODULE}:clear"
+            )
+        )
+    rows.append(bottom)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "❌ Cancel", callback_data=f"{CB_MODULE}:cancel"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 def build_edit_type_keyboard(task_id: int) -> InlineKeyboardMarkup:

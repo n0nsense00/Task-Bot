@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
-from database.models import Task
+from database.models import Module, Task
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                     ('lecture','tutorial','assignment','midterm','final','personal')),
     module_code TEXT,
     due_date    TEXT    NOT NULL,
+    due_time    TEXT,
     week_number INTEGER,
     notes       TEXT,
     completed   INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
@@ -38,7 +39,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_week_number ON tasks(week_number);
 CREATE INDEX IF NOT EXISTS idx_tasks_type        ON tasks(task_type);
+
+CREATE TABLE IF NOT EXISTS modules (
+    code TEXT PRIMARY KEY,
+    name TEXT
+);
 """
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply additive schema changes that ``CREATE TABLE IF NOT EXISTS`` can't.
+
+    SQLite's ``IF NOT EXISTS`` only creates tables — it doesn't add columns to
+    existing tables. So when a deployed bot already has a ``tasks`` table from
+    an earlier schema, we need ``ALTER TABLE ADD COLUMN`` to bring it up to
+    date. Idempotent: re-running is a no-op.
+    """
+    cur = conn.execute("PRAGMA table_info(tasks)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "due_time" not in columns:
+        logger.info("Migrating: adding due_time column to tasks")
+        conn.execute("ALTER TABLE tasks ADD COLUMN due_time TEXT")
 
 
 @contextmanager
@@ -62,6 +83,14 @@ def _get_conn() -> Iterator[sqlite3.Connection]:
 
 def _row_to_task(row: sqlite3.Row) -> Task:
     """Convert a ``sqlite3.Row`` from the ``tasks`` table into a ``Task``."""
+    # ``due_time`` may be absent on rows from a pre-migration schema even
+    # after the ALTER TABLE ran (rows persisted before the alter return
+    # NULL for the new column, which sqlite3.Row exposes as None — handle
+    # the missing-key case defensively for safety regardless).
+    try:
+        due_time = row["due_time"]
+    except (IndexError, KeyError):
+        due_time = None
     return Task(
         id=row["id"],
         title=row["title"],
@@ -72,17 +101,27 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         notes=row["notes"],
         completed=bool(row["completed"]),
         created_at=datetime.fromisoformat(row["created_at"]),
+        due_time=due_time,
     )
 
 
-def init_db() -> None:
-    """Create the ``data/`` directory and ``tasks`` table if absent.
+def _row_to_module(row: sqlite3.Row) -> Module:
+    """Convert a ``sqlite3.Row`` from the ``modules`` table into a ``Module``."""
+    return Module(code=row["code"], name=row["name"])
 
-    Idempotent — safe to call on every bot startup.
+
+def init_db() -> None:
+    """Create the ``data/`` directory and required tables, then run migrations.
+
+    Idempotent — safe to call on every bot startup. ``CREATE TABLE IF NOT
+    EXISTS`` handles the new-DB case; :func:`_migrate_schema` covers the
+    case where an older ``tasks`` schema exists from before ``due_time``
+    was introduced.
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _get_conn() as conn:
         conn.executescript(_SCHEMA_SQL)
+        _migrate_schema(conn)
     logger.info("Database initialized at %s", DB_PATH)
 
 
@@ -95,14 +134,15 @@ def add_task(task: Task) -> int:
     with _get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO tasks
-                 (title, task_type, module_code, due_date,
+                 (title, task_type, module_code, due_date, due_time,
                   week_number, notes, completed, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.title,
                 task.task_type,
                 task.module_code,
                 task.due_date.isoformat(),
+                task.due_time,
                 task.week_number,
                 task.notes,
                 1 if task.completed else 0,
@@ -133,13 +173,14 @@ def update_task(task: Task) -> bool:
         cur = conn.execute(
             """UPDATE tasks
                  SET title = ?, task_type = ?, module_code = ?, due_date = ?,
-                     week_number = ?, notes = ?, completed = ?
+                     due_time = ?, week_number = ?, notes = ?, completed = ?
                WHERE id = ?""",
             (
                 task.title,
                 task.task_type,
                 task.module_code,
                 task.due_date.isoformat(),
+                task.due_time,
                 task.week_number,
                 task.notes,
                 1 if task.completed else 0,
@@ -257,4 +298,50 @@ def cleanup_past_deadlines(today: date) -> int:
                  AND due_date < ?""",
             (today_iso,),
         )
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Modules table — populated from seed/seed_modules.csv
+# ---------------------------------------------------------------------------
+
+def get_modules() -> list[Module]:
+    """Return every module the user has seeded, sorted by code."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM modules ORDER BY code"
+        ).fetchall()
+    return [_row_to_module(r) for r in rows]
+
+
+def get_module(code: str) -> Optional[Module]:
+    """Return the module matching ``code`` (case-sensitive), or ``None``."""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM modules WHERE code = ?", (code,)
+        ).fetchone()
+    return _row_to_module(row) if row else None
+
+
+def add_module(module: Module) -> bool:
+    """Insert or replace a module row. Returns ``True`` always (no failure mode)."""
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO modules (code, name) VALUES (?, ?)",
+            (module.code, module.name),
+        )
+    return True
+
+
+def count_modules() -> int:
+    """Return the number of seeded modules."""
+    with _get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM modules").fetchone()
+    return int(row[0])
+
+
+def delete_all_modules() -> int:
+    """Wipe the modules table. Used by the seeder's --replace path."""
+    with _get_conn() as conn:
+        cur = conn.execute("DELETE FROM modules")
         return cur.rowcount

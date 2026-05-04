@@ -209,3 +209,4 @@ __marimo__/
 # Task-Bot local data (personal tasks — never commit)
 data/
 seed/seed_data.csv
+seed/seed_modules.csv
