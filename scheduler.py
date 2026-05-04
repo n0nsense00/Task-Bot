@@ -24,8 +24,13 @@ from telegram.constants import ParseMode
 from telegram.ext import Application
 
 from config import BRIEF_HOUR, BRIEF_MINUTE, MY_TELEGRAM_ID, TIMEZONE
-from database.db import get_semester_deadlines, get_tasks_for_date
+from database.db import (
+    cleanup_past_deadlines,
+    get_semester_deadlines,
+    get_tasks_for_date,
+)
 from database.models import Task
+from utils.clock import today_local
 from utils.format import (
     DIVIDER,
     days_away_label,
@@ -42,6 +47,9 @@ _LAST_BRIEF_FILE: Path = _PROJECT_ROOT / "data" / "last_brief.txt"
 _JOB_ID: str = "morning_brief"
 _HEARTBEAT_JOB_ID: str = "heartbeat"
 _HEARTBEAT_INTERVAL_MINUTES: int = 10
+_CLEANUP_JOB_ID: str = "cleanup_past_deadlines"
+_CLEANUP_HOUR: int = 0
+_CLEANUP_MINUTE: int = 5
 _UPCOMING_WINDOW_DAYS: int = 14
 _UPCOMING_LIMIT: int = 3
 
@@ -194,6 +202,24 @@ async def _log_heartbeat() -> None:
     logger.info("heartbeat: alive")
 
 
+async def cleanup_deadlines_job() -> None:
+    """Daily 00:05 cron: purge midterms/finals whose date has passed.
+
+    Runs in the configured local timezone (so "midnight" is the user's
+    midnight, not UTC's). Lazy cleanup on /semester covers the case where
+    this job missed its window — between the two, /semester output stays
+    consistent with the user's calendar.
+    """
+    today = today_local()
+    deleted = cleanup_past_deadlines(today)
+    if deleted:
+        logger.info(
+            "Cleanup: deleted %d past midterm(s)/final(s) before %s",
+            deleted,
+            today.isoformat(),
+        )
+
+
 def build_scheduler(application: Application) -> AsyncIOScheduler:
     """Construct the AsyncIOScheduler with the daily brief and heartbeat jobs.
 
@@ -219,5 +245,14 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
         trigger=IntervalTrigger(minutes=_HEARTBEAT_INTERVAL_MINUTES),
         id=_HEARTBEAT_JOB_ID,
         replace_existing=True,
+    )
+    scheduler.add_job(
+        cleanup_deadlines_job,
+        trigger=CronTrigger(
+            hour=_CLEANUP_HOUR, minute=_CLEANUP_MINUTE, timezone=tz
+        ),
+        id=_CLEANUP_JOB_ID,
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
     return scheduler

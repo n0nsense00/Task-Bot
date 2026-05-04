@@ -19,6 +19,7 @@ from telegram.ext import ContextTypes
 
 from config import get_current_week
 from database.db import (
+    cleanup_past_deadlines,
     get_semester_deadlines,
     get_task,
     get_tasks_for_date,
@@ -27,11 +28,10 @@ from database.db import (
 )
 from database.models import TASK_TYPE_LECTURE, TASK_TYPE_TUTORIAL, Task
 from utils.auth import authorized_only
+from utils.clock import today_local
 from utils.errors import safe
 from utils.format import (
     DIVIDER,
-    STATUS_DONE,
-    STATUS_DUE_TODAY,
     STATUS_FUTURE,
     STATUS_THIS_WEEK,
     build_delete_confirmation_keyboard,
@@ -160,29 +160,39 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized_only
 @safe
 async def semester(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /semester: midterms + finals grouped by urgency (this week / upcoming / completed)."""
+    """Handle /semester: upcoming midterms and finals only.
+
+    Past midterms and finals auto-delete — this command lazily purges them
+    before rendering, in addition to the daily 00:05 cron that does the
+    same purge in the background. Two sections only:
+
+    - 🔥 This Week (due in the next 7 days, including today)
+    - 📅 Upcoming (due more than 7 days from now)
+    """
     message = update.effective_message
     if message is None:
         return
 
+    today = today_local()
+    purged = cleanup_past_deadlines(today)
+    if purged:
+        logger.info("Lazy cleanup removed %d past deadline(s) on /semester", purged)
+
     deadlines = get_semester_deadlines()
     if not deadlines:
-        await message.reply_text("No midterms or finals recorded yet.")
+        await message.reply_text(
+            "🎯 <b>No upcoming midterms or finals</b>\n\n"
+            "<i>Add some via /add when your professors announce them. "
+            "Past deadlines auto-delete after their date passes.</i>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    today_date = date.today()
-    overdue: list[Task] = []
     this_week: list[Task] = []
     upcoming: list[Task] = []
-    completed: list[Task] = []
     for t in deadlines:
-        if t.completed:
-            completed.append(t)
-            continue
-        delta = (t.due_date - today_date).days
-        if delta < 0:
-            overdue.append(t)
-        elif delta <= 7:
+        delta = (t.due_date - today).days
+        if delta <= 7:
             this_week.append(t)
         else:
             upcoming.append(t)
@@ -205,24 +215,20 @@ async def semester(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         rendered.append("")
         return rendered
 
-    out: list[str] = ["🎯 <b>Semester Deadlines</b>", "", DIVIDER, ""]
-    out.extend(render_bucket("⚠️ Overdue", overdue, STATUS_DUE_TODAY))
+    out: list[str] = ["🎯 <b>Upcoming Deadlines</b>", "", DIVIDER, ""]
     out.extend(render_bucket("🔥 This Week", this_week, STATUS_THIS_WEEK))
     out.extend(render_bucket("📅 Upcoming", upcoming, STATUS_FUTURE))
-    out.extend(render_bucket("✅ Completed", completed, STATUS_DONE))
 
-    # Drop trailing empty line for cleaner footer attachment.
     while out and out[-1] == "":
         out.pop()
 
     out.append("")
     out.append(DIVIDER)
     out.append("")
-    counts = (
-        f"<i>{len(overdue)} overdue · {len(this_week)} this week · "
-        f"{len(upcoming)} upcoming · {len(completed)} done</i>"
+    out.append(
+        f"<i>{len(this_week)} this week · {len(upcoming)} upcoming · "
+        "past deadlines auto-delete</i>"
     )
-    out.append(counts)
 
     await message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 

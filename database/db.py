@@ -235,3 +235,26 @@ def delete_all_tasks() -> int:
     with _get_conn() as conn:
         cur = conn.execute("DELETE FROM tasks")
         return cur.rowcount
+
+
+def cleanup_past_deadlines(today: date) -> int:
+    """Delete every midterm/final whose ``due_date`` is strictly before ``today``.
+
+    Scope is intentionally narrow — only ``midterm`` and ``final`` rows are
+    auto-purged, because those are the "big deadlines" the owner actively
+    wants to disappear after the date passes. Lectures, tutorials,
+    assignments, and personal tasks are left alone (manual ``/delete`` only).
+
+    Called by both the daily scheduler job and lazy cleanup on /semester so
+    the view always reflects what's still ahead, even if the scheduler has
+    been down.
+    """
+    today_iso = today.isoformat()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            """DELETE FROM tasks
+               WHERE task_type IN ('midterm', 'final')
+                 AND due_date < ?""",
+            (today_iso,),
+        )
+        return cur.rowcount
