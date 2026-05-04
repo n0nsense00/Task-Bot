@@ -39,10 +39,14 @@ from database.db import init_db
 from handlers.add_task import build_add_conversation
 from handlers.basic import help_command, start
 from handlers.brief import brief
+from handlers.callbacks import (
+    delete_confirm_callback,
+    delete_request_callback,
+    done_callback,
+)
+from handlers.edit_task import build_edit_conversation
 from handlers.errors import error_handler, unknown_command
 from handlers.tasks import (
-    DELETE_CB_PREFIX,
-    delete_callback,
     delete_task_cmd,
     done_task_cmd,
     semester,
@@ -144,12 +148,25 @@ def main() -> None:
     application.add_handler(CommandHandler(CMD_DONE, done_task_cmd))
     application.add_handler(CommandHandler(CMD_DELETE, delete_task_cmd))
 
-    # Multi-step /add conversation (its own CommandHandler entry point).
+    # Conversation handlers — must register BEFORE bare CallbackQueryHandlers
+    # so their state-scoped callbacks claim updates ahead of the global ones.
     application.add_handler(build_add_conversation())
+    application.add_handler(build_edit_conversation())
 
-    # Inline-keyboard callback for the /delete confirmation.
+    # Inline-keyboard callbacks attached to /today task buttons. Patterns are
+    # anchored with ``^`` and ``$`` so the colon-count disambiguates between
+    # ``del:N`` (entry → confirmation prompt) and ``del:yes:N`` /
+    # ``del:no:N`` (confirmation answer).
     application.add_handler(
-        CallbackQueryHandler(delete_callback, pattern=f"^{DELETE_CB_PREFIX}:")
+        CallbackQueryHandler(done_callback, pattern=r"^done:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(delete_request_callback, pattern=r"^del:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            delete_confirm_callback, pattern=r"^del:(yes|no):\d+$"
+        )
     )
 
     # Catch-all for unrecognised /commands — must come AFTER all known commands,

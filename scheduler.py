@@ -27,11 +27,11 @@ from config import BRIEF_HOUR, BRIEF_MINUTE, MY_TELEGRAM_ID, TIMEZONE
 from database.db import get_semester_deadlines, get_tasks_for_date
 from database.models import Task
 from utils.format import (
-    TYPE_DISPLAY_LABEL,
-    TYPE_DISPLAY_ORDER,
+    DIVIDER,
     days_away_label,
-    format_task_line,
+    format_grouped_today,
     module_prefix,
+    morning_greeting,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,8 +81,10 @@ def _upcoming_deadlines() -> list[Task]:
 def build_morning_brief() -> str:
     """Assemble the morning brief as an HTML-formatted string.
 
-    Short-circuits to a terse "clear day" message when there is nothing due
-    today AND no upcoming deadlines in the next fortnight.
+    Layout matches /today: greeting, divider, grouped task sections, divider,
+    upcoming-deadlines preview. Short-circuits to a terse "clear day" message
+    when there is nothing due today AND no upcoming deadlines in the next
+    fortnight, so the morning push doesn't pester the user with empty lists.
     """
     today = date.today()
     tasks = get_tasks_for_date(today)
@@ -91,33 +93,26 @@ def build_morning_brief() -> str:
     if not tasks and not upcoming:
         return _CLEAR_DAY_MESSAGE
 
-    lines: list[str] = ["☀️ <b>Good morning! Here's your day:</b>", ""]
+    lines: list[str] = [morning_greeting(), "", DIVIDER]
 
     if tasks:
-        grouped: dict[str, list[Task]] = {}
-        for t in tasks:
-            grouped.setdefault(t.task_type, []).append(t)
-        lines.append(f"<b>Today — {today.isoformat()}</b>")
-        for ttype in TYPE_DISPLAY_ORDER:
-            bucket = grouped.get(ttype)
-            if not bucket:
-                continue
-            lines.append(f"<b>{TYPE_DISPLAY_LABEL[ttype]}</b>")
-            lines.extend(format_task_line(t) for t in bucket)
-            lines.append("")
+        lines.extend(format_grouped_today(tasks, today))
     else:
-        lines.append("<i>Nothing due today.</i>")
         lines.append("")
+        lines.append("<i>Nothing due today.</i>")
 
     if upcoming:
-        lines.append("⏰ <b>Upcoming deadlines:</b>")
+        lines.append("")
+        lines.append(DIVIDER)
+        lines.append("")
+        lines.append("⏰ <b>Upcoming deadlines</b>")
         for t in upcoming:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
             relative = days_away_label(t.due_date)
             lines.append(
                 f"• {module_prefix(t)}{type_label} — "
-                f"{date_label} ({relative})  <code>(id {t.id})</code>"
+                f"{date_label} ({relative})  <code>#{t.id}</code>"
             )
 
     return "\n".join(lines).rstrip()

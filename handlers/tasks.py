@@ -1,22 +1,24 @@
-"""Query and mutation commands: /today, /week, /semester, /done, /delete.
+"""Slash-command handlers: /today, /week, /semester, /done, /delete.
 
-All Telegram messages sent from this module use HTML parse mode. Every
-user-supplied string (title, module_code, notes, task_type) is run through
-:func:`utils.format.esc` before interpolation into a template — the single
-chokepoint preventing injection of ``<b>``, ``<a>``, etc.
+Inline-keyboard callbacks (Done / Edit / Delete buttons under /today, plus
+the Yes/No delete confirmation) are handled in :mod:`handlers.callbacks` and
+:mod:`handlers.edit_task` — this module is purely for the slash entry points
+and their text replies.
+
+All Telegram messages use HTML parse mode. Every user-supplied string flows
+through :func:`utils.format.esc` before interpolation.
 """
 from __future__ import annotations
 
 import logging
 from datetime import date
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import get_current_week
 from database.db import (
-    delete_task,
     get_semester_deadlines,
     get_task,
     get_tasks_for_date,
@@ -27,11 +29,21 @@ from database.models import TASK_TYPE_LECTURE, TASK_TYPE_TUTORIAL, Task
 from utils.auth import authorized_only
 from utils.errors import safe
 from utils.format import (
+    DIVIDER,
+    STATUS_DONE,
+    STATUS_DUE_TODAY,
+    STATUS_FUTURE,
+    STATUS_THIS_WEEK,
+    build_delete_confirmation_keyboard,
+    build_task_keyboard,
     days_away_label,
     esc,
     format_grouped_today,
-    format_task_line,
+    format_relative_date,
+    format_task_card,
     module_prefix,
+    morning_greeting,
+    todays_tip,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,33 +54,52 @@ _DELETE_USAGE_MESSAGE: str = (
     "Usage: /delete &lt;task_id&gt;  e.g. <code>/delete 4</code>"
 )
 
-DELETE_CB_PREFIX: str = "del"
+
+# ---------------------------------------------------------------------------
+# /today
+# ---------------------------------------------------------------------------
+
+def _render_today() -> tuple[str, "InlineKeyboardMarkup | None"]:  # type: ignore[name-defined]
+    """Compose today's text + keyboard. Shared with the callback re-render path."""
+    today = date.today()
+    tasks = get_tasks_for_date(today)
+    if not tasks:
+        return (_NO_TASKS_TODAY_MESSAGE, None)
+
+    lines: list[str] = [morning_greeting(), "", DIVIDER]
+    lines.extend(format_grouped_today(tasks, today))
+    lines.append("")
+    lines.append(DIVIDER)
+    lines.append("")
+    plural = "s" if len(tasks) != 1 else ""
+    lines.append(f"<i>{len(tasks)} task{plural} today</i>")
+    lines.append("")
+    lines.append(todays_tip())
+    return ("\n".join(lines), build_task_keyboard(tasks))
 
 
 @authorized_only
 @safe
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /today: list tasks due today, grouped by task type."""
+    """Handle /today: list tasks due today with action buttons."""
     message = update.effective_message
     if message is None:
         return
 
-    target = date.today()
-    tasks = get_tasks_for_date(target)
-    if not tasks:
-        await message.reply_text(_NO_TASKS_TODAY_MESSAGE)
-        return
-
-    lines = format_grouped_today(tasks, target)
+    text, keyboard = _render_today()
     await message.reply_text(
-        "\n".join(lines).rstrip(), parse_mode=ParseMode.HTML
+        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
     )
 
+
+# ---------------------------------------------------------------------------
+# /week
+# ---------------------------------------------------------------------------
 
 @authorized_only
 @safe
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /week: lectures this academic week + tutorials next academic week."""
+    """Handle /week: this week's lectures + next week's tutorials, text-only."""
     message = update.effective_message
     if message is None:
         return
@@ -86,31 +117,50 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     next_week_tutorials = get_tasks_for_week(current + 1, [TASK_TYPE_TUTORIAL])
 
     def render(header: str, items: list[Task]) -> list[str]:
-        """Render a named section of the /week output as HTML lines."""
+        """Render a labelled section as a list of HTML lines."""
         rendered = [f"<b>{header}</b>"]
         if not items:
-            rendered.append("(none)")
+            rendered.append("<i>(none)</i>")
             return rendered
         for t in items:
             weekday = t.due_date.strftime("%a")
+            relative = format_relative_date(t.due_date)
             rendered.append(
-                f"• {weekday} {t.due_date.isoformat()} — "
-                f"{module_prefix(t)}{esc(t.title)} <code>(id {t.id})</code>"
+                f"• {weekday} {t.due_date.isoformat()} ({relative}) — "
+                f"{module_prefix(t)}{esc(t.title)}  <code>#{t.id}</code>"
             )
+            if t.notes:
+                rendered.append(f"  <i>{esc(t.notes)}</i>")
         return rendered
 
-    out: list[str] = [f"<b>Week {current}</b>", ""]
+    out: list[str] = [
+        f"📅 <b>Week {current}</b>",
+        f"<i>{date.today().strftime('%A, %d %b %Y')}</i>",
+        "",
+        DIVIDER,
+        "",
+    ]
     out.extend(render("📚 This Week's Lectures", this_week_lectures))
     out.append("")
     out.extend(render("📝 Next Week's Tutorials", next_week_tutorials))
+    out.append("")
+    out.append(DIVIDER)
+    out.append("")
+    out.append(
+        "<i>Tip: head to /today for an actionable, button-equipped view.</i>"
+    )
 
     await message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
 
 
+# ---------------------------------------------------------------------------
+# /semester
+# ---------------------------------------------------------------------------
+
 @authorized_only
 @safe
 async def semester(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /semester: all midterms and finals, chronological, with ``days away``."""
+    """Handle /semester: midterms + finals grouped by urgency (this week / upcoming / completed)."""
     message = update.effective_message
     if message is None:
         return
@@ -121,23 +171,68 @@ async def semester(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     today_date = date.today()
-    lines: list[str] = ["<b>Semester Deadlines</b>", ""]
+    overdue: list[Task] = []
+    this_week: list[Task] = []
+    upcoming: list[Task] = []
+    completed: list[Task] = []
     for t in deadlines:
-        is_past = t.due_date < today_date
-        marker = "✅ " if is_past else ""
-        type_label = t.task_type.capitalize()
-        date_label = t.due_date.strftime("%a %d %b")  # e.g. "Mon 15 Dec"
-        relative = days_away_label(t.due_date)
-        lines.append(
-            f"• {marker}{module_prefix(t)}{type_label} — "
-            f"{date_label} ({relative})  <code>(id {t.id})</code>"
-        )
+        if t.completed:
+            completed.append(t)
+            continue
+        delta = (t.due_date - today_date).days
+        if delta < 0:
+            overdue.append(t)
+        elif delta <= 7:
+            this_week.append(t)
+        else:
+            upcoming.append(t)
 
-    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    def render_bucket(
+        header: str, items: list[Task], status_emoji: str
+    ) -> list[str]:
+        """Render a labelled section of the /semester output."""
+        if not items:
+            return []
+        rendered: list[str] = [f"<b>{header}</b>"]
+        for t in items:
+            type_label = t.task_type.capitalize()
+            date_label = t.due_date.strftime("%a %d %b")
+            relative = days_away_label(t.due_date)
+            rendered.append(
+                f"{status_emoji} {module_prefix(t)}{type_label} — "
+                f"{date_label} ({relative})  <code>#{t.id}</code>"
+            )
+        rendered.append("")
+        return rendered
 
+    out: list[str] = ["🎯 <b>Semester Deadlines</b>", "", DIVIDER, ""]
+    out.extend(render_bucket("⚠️ Overdue", overdue, STATUS_DUE_TODAY))
+    out.extend(render_bucket("🔥 This Week", this_week, STATUS_THIS_WEEK))
+    out.extend(render_bucket("📅 Upcoming", upcoming, STATUS_FUTURE))
+    out.extend(render_bucket("✅ Completed", completed, STATUS_DONE))
+
+    # Drop trailing empty line for cleaner footer attachment.
+    while out and out[-1] == "":
+        out.pop()
+
+    out.append("")
+    out.append(DIVIDER)
+    out.append("")
+    counts = (
+        f"<i>{len(overdue)} overdue · {len(this_week)} this week · "
+        f"{len(upcoming)} upcoming · {len(completed)} done</i>"
+    )
+    out.append(counts)
+
+    await message.reply_text("\n".join(out), parse_mode=ParseMode.HTML)
+
+
+# ---------------------------------------------------------------------------
+# /done <id>
+# ---------------------------------------------------------------------------
 
 def _parse_task_id_arg(context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    """Return the first ``context.args`` entry parsed as int, or ``None`` if invalid."""
+    """Return the first ``context.args`` entry parsed as int, else None."""
     args = context.args or []
     if not args:
         return None
@@ -150,7 +245,7 @@ def _parse_task_id_arg(context: ContextTypes.DEFAULT_TYPE) -> int | None:
 @authorized_only
 @safe
 async def done_task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ``/done <task_id>``: mark a task as completed."""
+    """Handle ``/done <task_id>``: mark complete, reply with task card."""
     message = update.effective_message
     if message is None:
         return
@@ -166,17 +261,20 @@ async def done_task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     mark_complete(task_id)
-    await message.reply_text(
-        f"Marked done: {module_prefix(task)}{esc(task.title)} "
-        f"<code>(id {task_id})</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    # Refresh the task object so the card shows completed=True.
+    task.completed = True
+    body = "✅ <b>Done</b>\n\n" + format_task_card(task)
+    await message.reply_text(body, parse_mode=ParseMode.HTML)
 
+
+# ---------------------------------------------------------------------------
+# /delete <id>
+# ---------------------------------------------------------------------------
 
 @authorized_only
 @safe
 async def delete_task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ``/delete <task_id>``: show confirmation keyboard before deleting."""
+    """Handle ``/delete <task_id>``: show Yes/No confirmation card."""
     message = update.effective_message
     if message is None:
         return
@@ -191,68 +289,9 @@ async def delete_task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await message.reply_text(f"No task with ID {task_id}.")
         return
 
-    week_info = f"  •  Week: {task.week_number}" if task.week_number else ""
-    preview = (
-        "<b>Delete this task?</b>\n"
-        f"{module_prefix(task)}{esc(task.title)}\n"
-        f"<i>Type: {esc(task.task_type)}  •  Due: {task.due_date.isoformat()}"
-        f"{week_info}</i>"
-    )
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "Yes, delete",
-                    callback_data=f"{DELETE_CB_PREFIX}:yes:{task_id}",
-                ),
-                InlineKeyboardButton(
-                    "Cancel",
-                    callback_data=f"{DELETE_CB_PREFIX}:no:{task_id}",
-                ),
-            ]
-        ]
-    )
+    confirmation = "🗑️ <b>Delete this task?</b>\n\n" + format_task_card(task)
     await message.reply_text(
-        preview, parse_mode=ParseMode.HTML, reply_markup=keyboard
-    )
-
-
-@authorized_only
-@safe
-async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the yes/no callback from the /delete confirmation keyboard."""
-    query = update.callback_query
-    if query is None or query.data is None:
-        return
-    await query.answer()
-
-    parts = query.data.split(":")
-    if len(parts) != 3 or parts[0] != DELETE_CB_PREFIX:
-        return
-
-    action, raw_id = parts[1], parts[2]
-    try:
-        task_id = int(raw_id)
-    except ValueError:
-        await query.edit_message_text("Invalid callback payload.")
-        return
-
-    if action == "no":
-        await query.edit_message_text("Cancelled. No tasks were deleted.")
-        return
-    if action != "yes":
-        return
-
-    task = get_task(task_id)
-    if task is None:
-        await query.edit_message_text(
-            f"No task with ID {task_id} (already deleted?)."
-        )
-        return
-
-    delete_task(task_id)
-    await query.edit_message_text(
-        f"Deleted: {module_prefix(task)}{esc(task.title)} "
-        f"<code>(id {task_id})</code>",
+        confirmation,
         parse_mode=ParseMode.HTML,
+        reply_markup=build_delete_confirmation_keyboard(task_id),
     )

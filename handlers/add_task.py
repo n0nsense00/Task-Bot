@@ -30,6 +30,7 @@ from database.db import add_task
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
 from utils.errors import safe
+from utils.format import format_task_card
 
 logger = logging.getLogger(__name__)
 
@@ -234,15 +235,10 @@ async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     context.user_data.pop(_USER_DATA_KEY, None)
 
-    module = f"[{_esc(task.module_code)}] " if task.module_code else ""
-    week_info = f"  •  Week: {task.week_number}" if task.week_number else ""
-    notes_info = f"\n<i>Notes: {_esc(task.notes)}</i>" if task.notes else ""
-    summary = (
-        f"<b>Added task #{new_id}</b>\n"
-        f"{module}{_esc(task.title)}\n"
-        f"<i>Type: {_esc(task.task_type)}  •  Due: {task.due_date.isoformat()}"
-        f"{week_info}</i>{notes_info}"
-    )
+    # Stamp the persisted id back onto the dataclass so format_task_card
+    # renders ``#N`` rather than ``#None``.
+    task.id = new_id
+    summary = "✅ <b>Added</b>\n\n" + format_task_card(task)
     await message.reply_text(summary, parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 

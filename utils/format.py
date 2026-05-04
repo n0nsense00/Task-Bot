@@ -1,14 +1,17 @@
-"""Shared HTML formatting helpers for task display.
+"""Shared HTML formatting helpers + inline-keyboard builders for task display.
 
-Centralised here so both the on-demand command handlers (``/today``, ``/week``,
-``/semester``) and the scheduled morning brief render tasks identically.
-Every user-supplied string must flow through :func:`esc` before interpolation
-to prevent injection of HTML tags into the rendered message.
+Centralised so on-demand command handlers (/today, /week, /semester, /brief),
+the scheduled morning brief, and callback handlers all render identically.
+Every user-supplied string flows through :func:`esc` before interpolation —
+the single chokepoint that prevents injection of HTML tags into the rendered
+Telegram message.
 """
 from __future__ import annotations
 
 import html
 from datetime import date
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from database.models import (
     TASK_TYPE_ASSIGNMENT,
@@ -20,6 +23,30 @@ from database.models import (
     Task,
 )
 
+# ---------------------------------------------------------------------------
+# Visual style constants
+# ---------------------------------------------------------------------------
+
+DIVIDER: str = "━━━━━━━━━━━━━━━━━━━"
+
+TYPE_EMOJI: dict[str, str] = {
+    TASK_TYPE_LECTURE: "📚",
+    TASK_TYPE_TUTORIAL: "📝",
+    TASK_TYPE_ASSIGNMENT: "📦",
+    TASK_TYPE_MIDTERM: "🎯",
+    TASK_TYPE_FINAL: "📕",
+    TASK_TYPE_PERSONAL: "✏️",
+}
+
+TYPE_PLURAL: dict[str, str] = {
+    TASK_TYPE_LECTURE: "Lectures",
+    TASK_TYPE_TUTORIAL: "Tutorials",
+    TASK_TYPE_ASSIGNMENT: "Assignments",
+    TASK_TYPE_MIDTERM: "Midterms",
+    TASK_TYPE_FINAL: "Finals",
+    TASK_TYPE_PERSONAL: "Personal",
+}
+
 TYPE_DISPLAY_ORDER: tuple[str, ...] = (
     TASK_TYPE_LECTURE,
     TASK_TYPE_TUTORIAL,
@@ -29,15 +56,37 @@ TYPE_DISPLAY_ORDER: tuple[str, ...] = (
     TASK_TYPE_PERSONAL,
 )
 
-TYPE_DISPLAY_LABEL: dict[str, str] = {
-    TASK_TYPE_LECTURE: "Lectures",
-    TASK_TYPE_TUTORIAL: "Tutorials",
-    TASK_TYPE_ASSIGNMENT: "Assignments",
-    TASK_TYPE_MIDTERM: "Midterms",
-    TASK_TYPE_FINAL: "Finals",
-    TASK_TYPE_PERSONAL: "Personal",
-}
+# Backward-compat alias kept for older imports — same content as TYPE_PLURAL.
+TYPE_DISPLAY_LABEL: dict[str, str] = TYPE_PLURAL
 
+STATUS_DUE_TODAY: str = "⚠️"
+STATUS_THIS_WEEK: str = "🔥"
+STATUS_DONE: str = "✅"
+STATUS_FUTURE: str = "📅"
+
+# Tips are rotated by date so the same tip shows all day.
+TIPS: tuple[str, ...] = (
+    "💡 Tip: tap ✅ on any task in /today to mark it complete instantly",
+    "💡 Tip: tap 📝 on a task to edit any field",
+    "💡 Tip: tap 🗑️ to delete a task (with a confirmation prompt)",
+    "💡 Tip: send /add to create a new task step by step",
+    "💡 Tip: /week shows lectures this week + tutorials next week",
+    "💡 Tip: /semester lists every midterm and final by due date",
+    "💡 Tip: /brief sends today's morning summary on demand",
+)
+
+# Callback-data prefixes used by the inline keyboards on /today.
+CB_DONE: str = "done"
+CB_DELETE: str = "del"   # del:N (entry) | del:yes:N | del:no:N
+CB_EDIT: str = "edit"    # edit:N (entry) | editf:<field>:N (field pick)
+CB_EDIT_FIELD: str = "editf"
+CB_EDIT_TYPE_VALUE: str = "edittype"  # edittype:<value>:N
+CB_EDIT_CANCEL: str = "editcancel"
+
+
+# ---------------------------------------------------------------------------
+# Escaping
+# ---------------------------------------------------------------------------
 
 def esc(text: str | None) -> str:
     """HTML-escape a user-supplied string; map ``None`` to the empty string."""
@@ -45,19 +94,46 @@ def esc(text: str | None) -> str:
 
 
 def module_prefix(task: Task) -> str:
-    """Return ``[MODULE] `` for tasks with a module_code, else an empty string."""
+    """Return ``[MODULE] `` (with trailing space) or ``""`` when no module_code."""
     return f"[{esc(task.module_code)}] " if task.module_code else ""
 
 
-def format_task_line(task: Task) -> str:
-    """Render one task as a bulleted HTML list item for grouped views."""
-    return (
-        f"• {module_prefix(task)}{esc(task.title)} <code>(id {task.id})</code>"
-    )
+# ---------------------------------------------------------------------------
+# Date formatting
+# ---------------------------------------------------------------------------
+
+def format_relative_date(target: date) -> str:
+    """Render ``target`` relative to today.
+
+    Examples: ``today``, ``tomorrow``, ``yesterday``, ``in 3 days``,
+    ``2 days ago``, or ``Wed 7 May`` for anything beyond a week.
+    """
+    delta = (target - date.today()).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    if delta == -1:
+        return "yesterday"
+    if 0 < delta <= 6:
+        return f"in {delta} days"
+    if -6 <= delta < 0:
+        return f"{-delta} days ago"
+    return target.strftime("%a %d %b")
+
+
+def format_absolute_date(target: date) -> str:
+    """Long-form date: ``Wednesday, 7 May 2026``.
+
+    Built up manually rather than via ``%-d`` / ``%#d`` because Linux and
+    Windows disagree on the no-leading-zero directive — and Task-Bot runs
+    on both (Windows for dev, Linux for the Railway worker).
+    """
+    return f"{target.strftime('%A')}, {target.day} {target.strftime('%b %Y')}"
 
 
 def days_away_label(target: date) -> str:
-    """Return a human-readable relative distance between today and ``target``."""
+    """Legacy alias used by /semester — phrasing 'N days away' / 'N days ago'."""
     delta = (target - date.today()).days
     if delta == 0:
         return "today"
@@ -70,23 +146,272 @@ def days_away_label(target: date) -> str:
     return f"{-delta} days ago"
 
 
-def format_grouped_today(tasks: list[Task], target_date: date) -> list[str]:
-    """Render tasks due on ``target_date`` as HTML lines, grouped by type.
+# ---------------------------------------------------------------------------
+# Section helpers
+# ---------------------------------------------------------------------------
 
-    Returns a list of lines (not a single joined string) so callers can mix
-    the output into a larger message — e.g. the morning brief prepends a
-    greeting and appends an upcoming-deadlines section.
+def format_section_header(title: str, emoji: str | None = None) -> str:
+    """Bold section header line, optionally prefixed with ``emoji``."""
+    prefix = f"{emoji} " if emoji else ""
+    return f"<b>{prefix}{esc(title)}</b>"
+
+
+# ---------------------------------------------------------------------------
+# Task rendering
+# ---------------------------------------------------------------------------
+
+def task_status_emoji(task: Task) -> str:
+    """Pick the most-relevant single status emoji for a task."""
+    if task.completed:
+        return STATUS_DONE
+    delta = (task.due_date - date.today()).days
+    if delta == 0:
+        return STATUS_DUE_TODAY
+    if 0 < delta <= 7:
+        return STATUS_THIS_WEEK
+    return STATUS_FUTURE
+
+
+def format_task_line(task: Task) -> str:
+    """One-line render of a task for grouped views.
+
+    Layout: ``• [MODULE] Title  #ID``. Notes (if present) on a second
+    indented italic line.
+    """
+    line = (
+        f"• {module_prefix(task)}{esc(task.title)}  "
+        f"<code>#{task.id}</code>"
+    )
+    if task.notes:
+        line += f"\n  <i>{esc(task.notes)}</i>"
+    return line
+
+
+def format_task_card(task: Task) -> str:
+    """Multi-line rich render of a single task.
+
+    Used for confirmations (delete, edit) and the post-/add summary.
+    Includes type emoji, module, title, type label, relative + absolute
+    date, week (if set), notes (if set), and ID.
+    """
+    type_emoji = TYPE_EMOJI.get(task.task_type, "•")
+    relative = format_relative_date(task.due_date)
+    absolute = task.due_date.strftime("%a %d %b %Y")
+
+    lines: list[str] = [
+        f"{type_emoji} {module_prefix(task)}<b>{esc(task.title)}</b>  "
+        f"<code>#{task.id}</code>",
+        f"<i>{esc(task.task_type.capitalize())} · "
+        f"{relative} ({absolute})</i>",
+    ]
+    if task.week_number is not None:
+        lines.append(f"<i>Week {task.week_number}</i>")
+    if task.notes:
+        lines.append("")
+        lines.append(esc(task.notes))
+    return "\n".join(lines)
+
+
+def format_grouped_today(tasks: list[Task], target_date: date) -> list[str]:
+    """Tasks due on ``target_date`` rendered as HTML lines, grouped by type.
+
+    Returns a list of lines for the caller to compose into a larger message.
+    Empty lines between sections are intentional spacing in Telegram.
     """
     grouped: dict[str, list[Task]] = {}
     for t in tasks:
         grouped.setdefault(t.task_type, []).append(t)
 
-    lines: list[str] = [f"<b>Today — {target_date.isoformat()}</b>", ""]
+    lines: list[str] = []
     for ttype in TYPE_DISPLAY_ORDER:
         bucket = grouped.get(ttype)
         if not bucket:
             continue
-        lines.append(f"<b>{TYPE_DISPLAY_LABEL[ttype]}</b>")
-        lines.extend(format_task_line(t) for t in bucket)
         lines.append("")
+        lines.append(f"<b>{TYPE_EMOJI[ttype]} {TYPE_PLURAL[ttype]}</b>")
+        lines.extend(format_task_line(t) for t in bucket)
     return lines
+
+
+def format_task_list(
+    tasks: list[Task],
+    group_by_type: bool = True,
+    header: str | None = None,
+) -> str:
+    """Render a list of tasks as a single HTML block.
+
+    ``group_by_type=True`` (default) sections by type with emojis. False
+    produces a flat bulleted list — useful for "upcoming deadlines" sections
+    where order is by date, not type.
+    """
+    if not tasks:
+        return ""
+
+    out: list[str] = []
+    if header:
+        out.append(format_section_header(header))
+
+    if group_by_type:
+        grouped: dict[str, list[Task]] = {}
+        for t in tasks:
+            grouped.setdefault(t.task_type, []).append(t)
+        for ttype in TYPE_DISPLAY_ORDER:
+            bucket = grouped.get(ttype)
+            if not bucket:
+                continue
+            if out:
+                out.append("")
+            out.append(f"<b>{TYPE_EMOJI[ttype]} {TYPE_PLURAL[ttype]}</b>")
+            out.extend(format_task_line(t) for t in bucket)
+    else:
+        for t in tasks:
+            out.append(format_task_line(t))
+
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Inline keyboards
+# ---------------------------------------------------------------------------
+
+# Soft cap on how many tasks get inline-action buttons in /today. Telegram
+# allows up to 100 buttons per message; beyond ~5 tasks (15 buttons) the
+# keyboard becomes visually cluttered on phone screens.
+TASK_KEYBOARD_MAX_TASKS: int = 5
+
+
+def build_task_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup | None:
+    """Three-buttons-per-task keyboard: ✅ Done, 📝 Edit, 🗑️ Delete.
+
+    Returns ``None`` for an empty list so callers can pass
+    ``reply_markup=None`` and Telegram drops the keyboard entirely.
+    Truncates silently to ``TASK_KEYBOARD_MAX_TASKS`` to keep the keyboard
+    height sane on mobile.
+    """
+    if not tasks:
+        return None
+    capped = tasks[:TASK_KEYBOARD_MAX_TASKS]
+    rows: list[list[InlineKeyboardButton]] = []
+    for t in capped:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"✅ #{t.id}", callback_data=f"{CB_DONE}:{t.id}"
+                ),
+                InlineKeyboardButton(
+                    f"📝 #{t.id}", callback_data=f"{CB_EDIT}:{t.id}"
+                ),
+                InlineKeyboardButton(
+                    f"🗑️ #{t.id}", callback_data=f"{CB_DELETE}:{t.id}"
+                ),
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def build_delete_confirmation_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Yes/No confirmation keyboard used by both /delete slash and 🗑️ button."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Yes, delete", callback_data=f"{CB_DELETE}:yes:{task_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"{CB_DELETE}:no:{task_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Field picker shown after the user taps 📝 Edit on a task."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📝 Title", callback_data=f"{CB_EDIT_FIELD}:title:{task_id}"
+                ),
+                InlineKeyboardButton(
+                    "🏷️ Type", callback_data=f"{CB_EDIT_FIELD}:type:{task_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎓 Module",
+                    callback_data=f"{CB_EDIT_FIELD}:module:{task_id}",
+                ),
+                InlineKeyboardButton(
+                    "📅 Due date",
+                    callback_data=f"{CB_EDIT_FIELD}:due:{task_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 Week",
+                    callback_data=f"{CB_EDIT_FIELD}:week:{task_id}",
+                ),
+                InlineKeyboardButton(
+                    "📋 Notes",
+                    callback_data=f"{CB_EDIT_FIELD}:notes:{task_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel",
+                    callback_data=f"{CB_EDIT_CANCEL}:{task_id}",
+                ),
+            ],
+        ]
+    )
+
+
+def build_edit_type_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Inline keyboard listing every valid task_type for the type-edit step."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for ttype in TYPE_DISPLAY_ORDER:
+        emoji = TYPE_EMOJI[ttype]
+        row.append(
+            InlineKeyboardButton(
+                f"{emoji} {ttype.capitalize()}",
+                callback_data=f"{CB_EDIT_TYPE_VALUE}:{ttype}:{task_id}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "❌ Cancel", callback_data=f"{CB_EDIT_CANCEL}:{task_id}"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# Greetings, tips, dividers
+# ---------------------------------------------------------------------------
+
+def todays_tip() -> str:
+    """Return one tip from :data:`TIPS`, rotated by date.
+
+    Same tip shows all day; cycles forward each midnight. Stable across
+    multiple commands within the same day so the user isn't whipsawed.
+    """
+    idx = date.today().toordinal() % len(TIPS)
+    return TIPS[idx]
+
+
+def morning_greeting() -> str:
+    """Two-line bold greeting + italic full date used at the top of /today and /brief."""
+    today = date.today()
+    return (
+        f"☀️ <b>Good morning!</b>\n"
+        f"<i>{today.strftime('%A, %d %b %Y')}</i>"
+    )

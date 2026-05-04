@@ -1,4 +1,9 @@
-"""Basic command handlers: ``/start`` and ``/help``."""
+"""Basic command handlers: ``/start`` and ``/help``.
+
+Both produce a sectioned command list with a rotated daily tip in the footer.
+``/help`` adds a section describing the inline-keyboard buttons available on
+``/today`` so the user discovers them without having to tap around blindly.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,58 +13,86 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from utils.auth import authorized_only
+from utils.errors import safe
+from utils.format import DIVIDER, todays_tip
 
 logger = logging.getLogger(__name__)
 
-_START_MESSAGE = (
-    "Hi! I'm your personal Task-Bot — I help you keep track of university "
-    "tasks, lectures, tutorials, and deadlines through the semester.\n\n"
-    "Commands coming online:\n"
-    "  /today     - what's on today\n"
-    "  /week      - this week's lectures + next week's tutorials\n"
-    "  /semester  - big deadlines (midterms, finals)\n"
-    "  /add       - add a new task\n"
-    "  /done      - mark a task done\n"
-    "  /delete    - delete a task\n"
-    "  /help      - show this list\n\n"
-    "Most of these are still being wired up. Stay tuned."
-)
 
-_HELP_MESSAGE = (
-    "<b>Task-Bot Commands</b>\n"
-    "\n"
-    "• /today — tasks due today, grouped by type\n"
-    "• /week — this week's lectures + next week's tutorials\n"
-    "• /semester — midterms and finals, chronological\n"
-    "• /brief — send the morning brief now (auto-sent daily at 08:00)\n"
-    "• /add — add a new task (interactive, step-by-step)\n"
-    "• /done &lt;id&gt; — mark a task as completed\n"
-    "• /delete &lt;id&gt; — delete a task (confirmation required)\n"
-    "• /cancel — abort the current /add flow\n"
-    "• /help — show this list\n"
-    "• /start — welcome message"
-)
+def _start_message() -> str:
+    """Build the /start welcome message with sectioned command list + tip."""
+    sections = [
+        "☀️ <b>Welcome to Task-Bot</b>",
+        "<i>Your personal university tasks tracker.</i>",
+        "",
+        DIVIDER,
+        "",
+        "<b>📅 View</b>",
+        "• /today — tasks due today",
+        "• /week — this week's lectures + next week's tutorials",
+        "• /semester — midterms &amp; finals",
+        "",
+        "<b>✏️ Manage</b>",
+        "• /add — create a new task (interactive)",
+        "• /done &lt;id&gt; — mark a task complete",
+        "• /delete &lt;id&gt; — delete a task",
+        "• /brief — today's morning summary on demand",
+        "",
+        DIVIDER,
+        "",
+        todays_tip(),
+    ]
+    return "\n".join(sections)
+
+
+def _help_message() -> str:
+    """Build the /help reference message — more detail than /start."""
+    sections = [
+        "📖 <b>Task-Bot Commands</b>",
+        "",
+        DIVIDER,
+        "",
+        "<b>📅 View</b>",
+        "• /today — tasks due today, with quick-action buttons",
+        "• /week — this week's lectures + next week's tutorials",
+        "• /semester — every midterm and final, grouped by urgency",
+        "",
+        "<b>✏️ Manage</b>",
+        "• /add — start the 6-step task creation flow",
+        "• /done &lt;id&gt; — mark a task done; e.g. <code>/done 24</code>",
+        "• /delete &lt;id&gt; — delete a task (asks confirmation); "
+        "e.g. <code>/delete 24</code>",
+        "• /cancel — abort an /add or /edit flow",
+        "• /brief — send today's morning summary now",
+        "",
+        "<b>🎮 Inline Buttons</b>",
+        "On /today, tap:",
+        "• ✅ to mark a task complete",
+        "• 📝 to edit any field",
+        "• 🗑️ to delete (with confirmation)",
+        "",
+        DIVIDER,
+        "",
+        todays_tip(),
+    ]
+    return "\n".join(sections)
 
 
 @authorized_only
+@safe
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ``/start``: greet the owner and outline planned commands."""
+    """Handle ``/start``: greet the owner with a sectioned command list."""
     message = update.effective_message
     if message is None:
         return
-    try:
-        await message.reply_text(_START_MESSAGE)
-    except Exception:
-        logger.exception("Failed to send /start response")
+    await message.reply_text(_start_message(), parse_mode=ParseMode.HTML)
 
 
 @authorized_only
+@safe
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ``/help``: placeholder, to be expanded in later phases."""
+    """Handle ``/help``: reference message with examples and inline-button cheat sheet."""
     message = update.effective_message
     if message is None:
         return
-    try:
-        await message.reply_text(_HELP_MESSAGE, parse_mode=ParseMode.HTML)
-    except Exception:
-        logger.exception("Failed to send /help response")
+    await message.reply_text(_help_message(), parse_mode=ParseMode.HTML)
