@@ -50,6 +50,7 @@ CMD_DONE: str = "done"
 CMD_DELETE: str = "delete"
 CMD_CANCEL: str = "cancel"
 CMD_BRIEF: str = "brief"
+CMD_CLEAR: str = "clear"
 
 # ----------------------------------------------------------------------------
 # Academic calendar

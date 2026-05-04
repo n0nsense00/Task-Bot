@@ -58,9 +58,13 @@ from utils.format import (
     build_edit_field_keyboard,
     build_edit_type_keyboard,
     build_module_keyboard,
+    build_notes_keyboard,
+    build_week_keyboard,
     esc,
     format_task_card,
     module_prefix,
+    parse_notes_callback,
+    parse_week_callback,
 )
 from utils.timepicker import (
     build_hour_keyboard,
@@ -240,18 +244,17 @@ async def edit_field_picked(
 
     if field == "week":
         await query.edit_message_text(
-            header
-            + "\nSend the new week number (1-13), "
-            "'clear' to remove it, or /cancel.",
+            header + "\nPick the new week number:",
             parse_mode=ParseMode.HTML,
+            reply_markup=build_week_keyboard(include_clear=True),
         )
         return EDIT_WEEK
 
     if field == "notes":
         await query.edit_message_text(
-            header
-            + "\nSend the new notes, 'clear' to remove them, or /cancel.",
+            header + "\nSend the new notes, or tap Clear to remove them:",
             parse_mode=ParseMode.HTML,
+            reply_markup=build_notes_keyboard(include_clear=True),
         )
         return EDIT_NOTES
 
@@ -513,42 +516,40 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 @authorized_only
 @safe
 async def edit_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """EDIT_WEEK: receive int 1-13, 'clear' to unset, save."""
-    message = update.effective_message
-    if message is None or message.text is None:
+    """EDIT_WEEK: receive week-picker callback (1-13 / Clear / Cancel)."""
+    query = update.callback_query
+    if query is None or query.data is None:
         return EDIT_WEEK
-    raw = message.text.strip()
+    await query.answer()
+
+    action, payload = parse_week_callback(query.data)
+
+    if action == "cancel":
+        await query.edit_message_text("Edit cancelled. No changes made.")
+        return _abort(context)
 
     task = _load_task(context)
     if task is None:
-        await message.reply_text("Task no longer exists. Edit cancelled.")
+        await query.edit_message_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
 
-    if raw.lower() == _CLEAR_KEYWORD:
+    if action == "clear":
         task.week_number = None
+    elif action == "set" and payload is not None and 1 <= payload <= 13:
+        task.week_number = payload
     else:
-        try:
-            week_num = int(raw)
-        except ValueError:
-            await message.reply_text(
-                "That's not a number. Try 1-13, 'clear', or /cancel."
-            )
-            return EDIT_WEEK
-        if not 1 <= week_num <= 13:
-            await message.reply_text(
-                "Week must be between 1 and 13. Try again, 'clear', or /cancel."
-            )
-            return EDIT_WEEK
-        task.week_number = week_num
+        return EDIT_WEEK
 
-    await message.reply_text(_save_and_summarize(task), parse_mode=ParseMode.HTML)
+    await query.edit_message_text(
+        _save_and_summarize(task), parse_mode=ParseMode.HTML
+    )
     return _abort(context)
 
 
 @authorized_only
 @safe
 async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """EDIT_NOTES: receive new notes, or 'clear' to unset."""
+    """EDIT_NOTES (text path): user typed new notes, save."""
     message = update.effective_message
     if message is None or message.text is None:
         return EDIT_NOTES
@@ -559,9 +560,41 @@ async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
 
-    task.notes = None if raw.lower() == _CLEAR_KEYWORD else raw
+    task.notes = (
+        None if raw.lower() == _CLEAR_KEYWORD or not raw else raw
+    )
     await message.reply_text(_save_and_summarize(task), parse_mode=ParseMode.HTML)
     return _abort(context)
+
+
+@authorized_only
+@safe
+async def edit_notes_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """EDIT_NOTES (button path): Clear or Cancel via inline keyboard."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return EDIT_NOTES
+    await query.answer()
+
+    action = parse_notes_callback(query.data)
+    if action == "cancel":
+        await query.edit_message_text("Edit cancelled. No changes made.")
+        return _abort(context)
+    if action in ("clear", "skip"):
+        task = _load_task(context)
+        if task is None:
+            await query.edit_message_text(
+                "Task no longer exists. Edit cancelled."
+            )
+            return _abort(context)
+        task.notes = None
+        await query.edit_message_text(
+            _save_and_summarize(task), parse_mode=ParseMode.HTML
+        )
+        return _abort(context)
+    return EDIT_NOTES
 
 
 @authorized_only
@@ -633,10 +666,11 @@ def build_edit_conversation() -> ConversationHandler:
                 CallbackQueryHandler(edit_time, pattern=r"^timehr:"),
             ],
             EDIT_WEEK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_week),
+                CallbackQueryHandler(edit_week, pattern=r"^week:"),
             ],
             EDIT_NOTES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_notes),
+                CallbackQueryHandler(edit_notes_callback, pattern=r"^notes:"),
             ],
         },
         fallbacks=[

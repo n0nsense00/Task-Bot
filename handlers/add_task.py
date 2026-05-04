@@ -54,7 +54,11 @@ from utils.format import (
     CB_MODULE,
     TYPE_EMOJI,
     build_module_keyboard,
+    build_notes_keyboard,
+    build_week_keyboard,
     format_task_card,
+    parse_notes_callback,
+    parse_week_callback,
 )
 from utils.timepicker import (
     build_hour_keyboard,
@@ -333,8 +337,9 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         await query.edit_message_text(
             "Time: <i>all day</i>\n\n"
-            "Week number? Send 1-13, 'skip', or /cancel.",
+            "📊 <b>Which week?</b>",
             parse_mode=ParseMode.HTML,
+            reply_markup=build_week_keyboard(include_skip=True),
         )
         return WEEK
 
@@ -372,8 +377,9 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         await query.edit_message_text(
             f"Time: <b>{time_str}</b>\n\n"
-            "Week number? Send 1-13, 'skip', or /cancel.",
+            "📊 <b>Which week?</b>",
             parse_mode=ParseMode.HTML,
+            reply_markup=build_week_keyboard(include_skip=True),
         )
         return WEEK
 
@@ -384,49 +390,61 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 @authorized_only
 @safe
 async def add_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """WEEK state: validate week number 1-13 or 'skip'."""
-    message = update.effective_message
-    if message is None or message.text is None:
+    """WEEK state: receive week-picker callback, advance to NOTES.
+
+    Pure tap interaction now — no text typing. Numbered buttons 1-13, plus
+    Skip (no week) and Cancel.
+    """
+    query = update.callback_query
+    if query is None or query.data is None:
         return WEEK
-    raw = message.text.strip()
-    if raw.lower() == _SKIP_KEYWORD:
+    await query.answer()
+
+    action, payload = parse_week_callback(query.data)
+
+    if action == "cancel":
+        await query.edit_message_text("Cancelled. Nothing was added.")
+        context.user_data.pop(_USER_DATA_KEY, None)
+        return ConversationHandler.END
+
+    if action == "skip":
         _draft(context)["week_number"] = None
+        week_label = "<i>skipped</i>"
+    elif action == "set" and payload is not None and 1 <= payload <= 13:
+        _draft(context)["week_number"] = payload
+        week_label = f"<b>Week {payload}</b>"
     else:
-        try:
-            week_num = int(raw)
-        except ValueError:
-            await message.reply_text(
-                "That's not a number. Try 1-13, 'skip', or /cancel."
-            )
-            return WEEK
-        if not 1 <= week_num <= 13:
-            await message.reply_text(
-                "Week must be between 1 and 13. Try again, 'skip', or /cancel."
-            )
-            return WEEK
-        _draft(context)["week_number"] = week_num
-    await message.reply_text(
-        "Notes? (any text, 'skip', or /cancel)"
+        return WEEK
+
+    await query.edit_message_text(
+        f"Week: {week_label}\n\n"
+        "📋 <b>Notes?</b> Tap Skip, or send any text:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_notes_keyboard(),
     )
     return NOTES
 
 
-@authorized_only
-@safe
-async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """NOTES state: capture optional notes, persist task, end."""
-    message = update.effective_message
-    if message is None or message.text is None:
-        return NOTES
-    raw = message.text.strip()
-    draft = _draft(context)
-    draft["notes"] = None if raw.lower() == _SKIP_KEYWORD else raw
+async def _finalize_add(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    via_query=None,
+) -> int:
+    """Persist the in-progress draft as a Task, send the success card, end.
 
+    Shared between :func:`add_notes` (text input path) and
+    :func:`add_notes_callback` (Skip-button path) so the save + reply logic
+    stays in one place.
+    """
+    draft = _draft(context)
     required = ("title", "task_type", "due_date")
     if any(k not in draft for k in required):
-        await message.reply_text(
-            "Draft is missing required fields — aborting. Please /add again."
-        )
+        target = update.effective_message
+        if target is not None:
+            await target.reply_text(
+                "Draft is missing required fields — aborting. Please /add again."
+            )
         context.user_data.pop(_USER_DATA_KEY, None)
         return ConversationHandler.END
 
@@ -443,17 +461,64 @@ async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         new_id = add_task(task)
     except Exception:
         logger.exception("Failed to save new task")
-        await message.reply_text(
-            "Couldn't save that task — check the logs. Nothing was stored."
-        )
+        target = update.effective_message
+        if target is not None:
+            await target.reply_text(
+                "Couldn't save that task — check the logs. Nothing was stored."
+            )
         context.user_data.pop(_USER_DATA_KEY, None)
         return ConversationHandler.END
 
     context.user_data.pop(_USER_DATA_KEY, None)
     task.id = new_id
     summary = "✅ <b>Added</b>\n\n" + format_task_card(task)
-    await message.reply_text(summary, parse_mode=ParseMode.HTML)
+    if via_query is not None:
+        await via_query.edit_message_text(summary, parse_mode=ParseMode.HTML)
+    else:
+        target = update.effective_message
+        if target is not None:
+            await target.reply_text(summary, parse_mode=ParseMode.HTML)
     return ConversationHandler.END
+
+
+@authorized_only
+@safe
+async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """NOTES state (text path): user typed notes, persist and end.
+
+    Magic word ``skip`` (case-insensitive) still works as a fallback for
+    typing-fast users — same behaviour as the Skip button.
+    """
+    message = update.effective_message
+    if message is None or message.text is None:
+        return NOTES
+    raw = message.text.strip()
+    _draft(context)["notes"] = (
+        None if raw.lower() == _SKIP_KEYWORD or not raw else raw
+    )
+    return await _finalize_add(update, context)
+
+
+@authorized_only
+@safe
+async def add_notes_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """NOTES state (button path): Skip or Cancel via inline keyboard."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return NOTES
+    await query.answer()
+
+    action = parse_notes_callback(query.data)
+    if action == "cancel":
+        await query.edit_message_text("Cancelled. Nothing was added.")
+        context.user_data.pop(_USER_DATA_KEY, None)
+        return ConversationHandler.END
+    if action in ("skip", "clear"):
+        _draft(context)["notes"] = None
+        return await _finalize_add(update, context, via_query=query)
+    return NOTES
 
 
 @authorized_only
@@ -494,10 +559,11 @@ def build_add_conversation() -> ConversationHandler:
                 CallbackQueryHandler(add_time, pattern=r"^timehr:"),
             ],
             WEEK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_week),
+                CallbackQueryHandler(add_week, pattern=r"^week:"),
             ],
             NOTES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_notes),
+                CallbackQueryHandler(add_notes_callback, pattern=r"^notes:"),
             ],
         },
         fallbacks=[CommandHandler(CMD_CANCEL, add_cancel)],

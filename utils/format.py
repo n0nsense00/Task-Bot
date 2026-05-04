@@ -92,6 +92,19 @@ CB_MODULE: str = "mod"
 # mod:clear          → clear the existing module (edit flow only)
 # mod:cancel         → abort the picker
 
+# Week-picker keyboard (used by /add WEEK and /edit EDIT_WEEK).
+CB_WEEK: str = "week"
+# week:set:<N>       → user picked week number 1-13
+# week:skip          → /add: no week (None)
+# week:clear         → /edit: clear existing week (set to None)
+# week:cancel        → abort the picker
+
+# Notes-prompt skip / clear button (used by /add NOTES and /edit EDIT_NOTES).
+CB_NOTES: str = "notes"
+# notes:skip         → /add: leave notes blank (None)
+# notes:clear        → /edit: clear existing notes (set to None)
+# notes:cancel       → abort the conversation
+
 
 # ---------------------------------------------------------------------------
 # Escaping
@@ -413,6 +426,110 @@ def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def build_week_keyboard(
+    *,
+    include_skip: bool = False,
+    include_clear: bool = False,
+) -> InlineKeyboardMarkup:
+    """Build a week-number picker: 13 buttons (1-13) + Skip/Clear + Cancel.
+
+    Layout: 5 + 5 + 3 grid of numbered buttons. ``include_skip`` adds a
+    "Skip" row (used by /add to mean 'no week assigned'). ``include_clear``
+    adds a "Clear" button (used by /edit to mean 'remove the current week').
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for week_num in range(1, 14):
+        row.append(
+            InlineKeyboardButton(
+                str(week_num), callback_data=f"{CB_WEEK}:set:{week_num}"
+            )
+        )
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    bottom: list[InlineKeyboardButton] = []
+    if include_skip:
+        bottom.append(
+            InlineKeyboardButton("Skip", callback_data=f"{CB_WEEK}:skip")
+        )
+    if include_clear:
+        bottom.append(
+            InlineKeyboardButton("Clear", callback_data=f"{CB_WEEK}:clear")
+        )
+    if bottom:
+        rows.append(bottom)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "❌ Cancel", callback_data=f"{CB_WEEK}:cancel"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def parse_week_callback(data: str) -> tuple[str, int | None]:
+    """Decode a week-picker callback into ``(action, payload)``.
+
+    Actions: ``set`` (payload = int 1-13), ``skip``, ``clear``, ``cancel``,
+    ``unknown``.
+    """
+    if data == f"{CB_WEEK}:skip":
+        return ("skip", None)
+    if data == f"{CB_WEEK}:clear":
+        return ("clear", None)
+    if data == f"{CB_WEEK}:cancel":
+        return ("cancel", None)
+    if data.startswith(f"{CB_WEEK}:set:"):
+        try:
+            return ("set", int(data[len(f"{CB_WEEK}:set:") :]))
+        except ValueError:
+            return ("unknown", None)
+    return ("unknown", None)
+
+
+def build_notes_keyboard(
+    *,
+    include_clear: bool = False,
+) -> InlineKeyboardMarkup:
+    """Build a Skip/Clear + Cancel keyboard for the notes prompt.
+
+    Used inline alongside a text-input prompt — user can either tap a
+    button (no notes / clear notes / abort) or send any text message
+    (notes content). The conversation state's CallbackQueryHandler and
+    MessageHandler each handle one of those input modes.
+    """
+    label = "Clear" if include_clear else "Skip"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"{CB_NOTES}:{'clear' if include_clear else 'skip'}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"{CB_NOTES}:cancel"
+                ),
+            ]
+        ]
+    )
+
+
+def parse_notes_callback(data: str) -> str:
+    """Decode a notes-prompt callback. Returns ``skip`` / ``clear`` / ``cancel`` / ``unknown``."""
+    if data == f"{CB_NOTES}:skip":
+        return "skip"
+    if data == f"{CB_NOTES}:clear":
+        return "clear"
+    if data == f"{CB_NOTES}:cancel":
+        return "cancel"
+    return "unknown"
 
 
 def build_module_keyboard(

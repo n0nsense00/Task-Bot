@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -25,7 +26,10 @@ from telegram.ext import (
 )
 
 from config import (
+    CMD_ADD,
     CMD_BRIEF,
+    CMD_CANCEL,
+    CMD_CLEAR,
     CMD_DELETE,
     CMD_DONE,
     CMD_HELP,
@@ -37,7 +41,12 @@ from config import (
 )
 from database.db import init_db
 from handlers.add_task import build_add_conversation
-from handlers.basic import help_command, start
+from handlers.basic import (
+    clear,
+    help_command,
+    start,
+    track_incoming_message,
+)
 from handlers.brief import brief
 from handlers.callbacks import (
     delete_confirm_callback,
@@ -101,8 +110,67 @@ def _get_build_identifier() -> str:
     return "unknown"
 
 
+def _install_message_tracker(application: Application) -> None:
+    """Wrap ``application.bot.send_message`` so /clear can find tracked messages.
+
+    Every successful send is recorded as a ``(chat_id, message_id)`` tuple in
+    ``bot_data['tracked_messages']``. Tracking can be temporarily skipped by
+    setting ``bot_data['_skip_tracking'] = True`` around a send (used by
+    /clear's own confirmation, which we don't want to pollute future runs).
+
+    The wrap replaces the instance-level method only, so PTB's class-level
+    behaviour stays intact and :func:`Message.reply_text`,
+    :func:`scheduler.send_morning_brief`, and any other path that ultimately
+    calls ``bot.send_message`` is captured uniformly.
+    """
+    original_send = application.bot.send_message
+
+    async def _tracked_send(*args, **kwargs):
+        msg = await original_send(*args, **kwargs)
+        if (
+            msg is not None
+            and not application.bot_data.get("_skip_tracking", False)
+        ):
+            tracked = application.bot_data.setdefault("tracked_messages", [])
+            tracked.append((msg.chat_id, msg.message_id))
+        return msg
+
+    application.bot.send_message = _tracked_send
+    logger.info("Message tracker installed (wrap of bot.send_message)")
+
+
+def _bot_command_menu() -> list[BotCommand]:
+    """Return the list registered with Telegram as the '/' suggestion menu.
+
+    Telegram clients show this list when the user taps the '/' button or
+    types '/' in the chat — eliminates the need to remember command names.
+    """
+    return [
+        BotCommand(CMD_TODAY, "Tasks due today"),
+        BotCommand(CMD_WEEK, "This week + next week"),
+        BotCommand(CMD_SEMESTER, "Upcoming midterms & finals"),
+        BotCommand(CMD_BRIEF, "Send today's morning summary now"),
+        BotCommand(CMD_ADD, "Add a new task"),
+        BotCommand(CMD_DONE, "Mark a task done by id"),
+        BotCommand(CMD_DELETE, "Delete a task by id"),
+        BotCommand(CMD_CLEAR, "Wipe this chat (last 48h)"),
+        BotCommand(CMD_CANCEL, "Cancel current /add or /edit flow"),
+        BotCommand(CMD_HELP, "Show command list"),
+        BotCommand(CMD_START, "Welcome message"),
+    ]
+
+
 async def _post_init(application: Application) -> None:
-    """Start the scheduler, then send a catch-up brief if one was missed today."""
+    """Install message tracker, register Telegram command menu, start scheduler."""
+    _install_message_tracker(application)
+
+    try:
+        await application.bot.set_my_commands(_bot_command_menu())
+        logger.info("Telegram '/' command menu registered")
+    except Exception:
+        # Non-fatal — the menu is a UX nicety, not load-bearing.
+        logger.exception("Failed to register Telegram command menu")
+
     scheduler = build_scheduler(application)
     scheduler.start()
     application.bot_data[_SCHEDULER_KEY] = scheduler
@@ -147,6 +215,7 @@ def main() -> None:
     application.add_handler(CommandHandler(CMD_BRIEF, brief))
     application.add_handler(CommandHandler(CMD_DONE, done_task_cmd))
     application.add_handler(CommandHandler(CMD_DELETE, delete_task_cmd))
+    application.add_handler(CommandHandler(CMD_CLEAR, clear))
 
     # Conversation handlers — must register BEFORE bare CallbackQueryHandlers
     # so their state-scoped callbacks claim updates ahead of the global ones.
@@ -172,6 +241,13 @@ def main() -> None:
     # Catch-all for unrecognised /commands — must come AFTER all known commands,
     # because PTB runs the first matching handler in group 0.
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # Group-1 message tracker for /clear: records every incoming message ID
+    # in bot_data['tracked_messages']. Lives in a separate group so it runs
+    # alongside (not in competition with) the group-0 handlers above.
+    application.add_handler(
+        MessageHandler(filters.ALL, track_incoming_message), group=1
+    )
 
     # PTB-level safety net for anything that slips past @safe on individual
     # handlers — logs only, never replies, to avoid double-messaging.
