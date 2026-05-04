@@ -86,3 +86,15 @@ TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Singapore")
 # hour plus one minute in BRIEF_MINUTE to see the cron fire in real time).
 BRIEF_HOUR: int = 8
 BRIEF_MINUTE: int = 0
+
+# Master switch for the daily 08:00 morning brief.
+# - When False: the scheduled cron is not installed AND the startup catch-up
+#   is skipped — the bot stays completely silent at the scheduled hour.
+# - When True (or env var MORNING_BRIEF_ENABLED=true / 1 / yes): the daily
+#   push fires as designed.
+# - The /brief slash command works in BOTH cases — it's an on-demand
+#   manual trigger that bypasses this flag, so you can still pull a brief
+#   any time you want one.
+MORNING_BRIEF_ENABLED: bool = os.getenv(
+    "MORNING_BRIEF_ENABLED", "false"
+).strip().lower() in ("true", "1", "yes", "on")

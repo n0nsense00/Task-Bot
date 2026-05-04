@@ -23,7 +23,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram.constants import ParseMode
 from telegram.ext import Application
 
-from config import BRIEF_HOUR, BRIEF_MINUTE, MY_TELEGRAM_ID, TIMEZONE
+from config import (
+    BRIEF_HOUR,
+    BRIEF_MINUTE,
+    MORNING_BRIEF_ENABLED,
+    MY_TELEGRAM_ID,
+    TIMEZONE,
+)
 from database.db import (
     cleanup_past_deadlines,
     get_semester_deadlines,
@@ -166,7 +172,17 @@ async def send_morning_brief(application: Application) -> None:
 
 
 async def catch_up_missed_brief(application: Application) -> None:
-    """If today's brief is overdue and not yet sent, fire it now."""
+    """If today's brief is overdue and not yet sent, fire it now.
+
+    Short-circuits when ``MORNING_BRIEF_ENABLED`` is False so a disabled
+    deploy doesn't pop a brief on startup.
+    """
+    if not MORNING_BRIEF_ENABLED:
+        logger.info(
+            "Morning brief is disabled (MORNING_BRIEF_ENABLED=false) — "
+            "skipping catch-up."
+        )
+        return
     if _brief_already_sent_today():
         logger.info("Today's brief already sent — skipping catch-up.")
         return
@@ -231,16 +247,22 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
     """
     tz = _resolve_timezone()
     scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(
-        send_morning_brief,
-        trigger=CronTrigger(
-            hour=BRIEF_HOUR, minute=BRIEF_MINUTE, timezone=tz
-        ),
-        args=(application,),
-        id=_JOB_ID,
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
+    if MORNING_BRIEF_ENABLED:
+        scheduler.add_job(
+            send_morning_brief,
+            trigger=CronTrigger(
+                hour=BRIEF_HOUR, minute=BRIEF_MINUTE, timezone=tz
+            ),
+            args=(application,),
+            id=_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+    else:
+        logger.info(
+            "Morning brief disabled (MORNING_BRIEF_ENABLED=false) — "
+            "cron not installed. /brief still works on demand."
+        )
     scheduler.add_job(
         _log_heartbeat,
         trigger=IntervalTrigger(minutes=_HEARTBEAT_INTERVAL_MINUTES),
