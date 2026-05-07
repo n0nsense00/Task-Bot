@@ -1,87 +1,96 @@
 # Task-Bot Seeder
 
-Bulk-load a semester's tasks from a CSV instead of sending `/add` fifty times.
+Bulk-load a semester's tasks from CSV instead of sending `/add` dozens of
+times. You can also seed module codes so the `/add` and `/edit` pickers show
+your real classes.
 
 ## Files
 
-- `seed_data.csv` — your private data. **Gitignored.** Edit this with real tasks.
-- `seed_data.example.csv` — reference template, committed to git.
-- `seed_tasks.py` — the import script.
+- `seed_data.csv` - private task data, gitignored.
+- `seed_data.example.csv` - committed task template.
+- `seed_tasks.py` - task import script.
+- `seed_modules.csv` - private module list, gitignored.
+- `seed_modules.example.csv` - committed module template.
+- `seed_modules.py` - module import script.
 
-When the repo is first cloned, `seed_data.csv` won't exist. Copy the example:
+When the repo is first cloned, the private CSV files will not exist. Copy the
+examples:
 
 ```bash
 cp seed/seed_data.example.csv seed/seed_data.csv
+cp seed/seed_modules.example.csv seed/seed_modules.csv
 ```
 
-Then open `seed/seed_data.csv` and replace the example rows with your real
-semester data.
+Then replace the example rows with your real semester data.
 
-## Usage
+## Task Usage
 
 From the project root, with the venv active:
 
 ```bash
-# Append mode — adds CSV rows on top of whatever's already in the DB.
+# Append rows on top of the current DB.
 python seed/seed_tasks.py
 
-# Replace mode — deletes ALL existing tasks first (prompts y/n), then imports.
+# Delete all existing tasks first, then import. Prompts for y/n.
 python seed/seed_tasks.py --replace
 
-# Custom CSV path.
+# Import a different CSV file.
 python seed/seed_tasks.py --file path/to/other.csv
 ```
 
-## CSV format
+## Task CSV Format
 
-The header row must be exactly:
+The current task CSV header is:
 
+```csv
+title,task_type,module_code,due_date,due_time,week_number,notes
 ```
+
+The older no-time header is still accepted for compatibility:
+
+```csv
 title,task_type,module_code,due_date,week_number,notes
 ```
 
 Rules:
 
-| Column        | Required | Format                                                                 |
-| ------------- | -------- | ---------------------------------------------------------------------- |
-| `title`       | yes      | any non-empty string                                                   |
-| `task_type`   | yes      | `lecture`, `tutorial`, `assignment`, `midterm`, `final`, or `personal` |
-| `module_code` | mostly   | required unless `task_type` is `personal` (leave blank for personal)   |
-| `due_date`    | yes      | `YYYY-MM-DD`                                                           |
-| `week_number` | no       | blank, or integer 1-13                                                 |
-| `notes`       | no       | any string, or blank                                                   |
+| Column | Required | Format |
+| --- | --- | --- |
+| `title` | yes | any non-empty string |
+| `task_type` | yes | `lecture`, `tutorial`, `assignment`, `midterm`, `final`, or `personal` |
+| `module_code` | mostly | required unless `task_type` is `personal` |
+| `due_date` | yes | `YYYY-MM-DD` |
+| `due_time` | no | blank, or `HH:MM` 24-hour time |
+| `week_number` | no | blank, or integer 1-13 |
+| `notes` | no | any string, or blank |
 
-- Lines starting with `#` are comments and skipped.
-- Blank lines are skipped.
-- Titles containing commas must be quoted: `"CS2040, Lecture 1",lecture,...`
+Lines starting with `#` are comments and skipped. Blank lines are skipped.
+Titles containing commas must be quoted, for example:
 
-## Validation
-
-Every row is validated **before anything is written**. If any single row fails,
-the script prints the source line number and reason and aborts with a non-zero
-exit code — no partial imports.
-
-Example failure:
-
-```
-ERROR: line 5: task_type 'lectur' not in allowed set: lecture, tutorial, assignment, midterm, final, personal
-  row: {'title': 'CS2040 Lecture 2', 'task_type': 'lectur', ...}
-Aborting — no rows inserted.
+```csv
+"CS2040, Lecture 1",lecture,CS2040,2026-01-13,09:00,1,Intro
 ```
 
-## Success output
+Every row is validated before anything is written. If one row fails, the
+script prints the source line number and exits without partial inserts.
 
-```
-Imported 47 tasks (24 lectures, 12 tutorials, 8 assignments, 2 midterms, 1 final)
+## Module Usage
+
+```bash
+# Append/update module rows.
+python seed/seed_modules.py
+
+# Delete all existing modules first, then import. Prompts for y/n.
+python seed/seed_modules.py --replace
 ```
 
-With `--replace`:
+Module CSV format:
 
-```
---replace will DELETE all 15 existing tasks and then insert the new ones. Are you sure? (y/n): y
-Deleted 15 existing tasks.
-Imported 47 tasks (...)
+```csv
+code,name
+CS2040,Data Structures and Algorithms
+MH2100,Calculus III
 ```
 
-Answer `n` (or anything other than `y`/`yes`) and the script exits without
-touching the database.
+`code` is required. `name` is optional; if blank, Telegram picker buttons show
+only the code.

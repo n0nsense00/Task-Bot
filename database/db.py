@@ -9,6 +9,7 @@ always closes the connection.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -19,8 +20,20 @@ from database.models import Module, Task
 
 logger = logging.getLogger(__name__)
 
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    pass
+else:
+    load_dotenv()
+
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
-DB_PATH: Path = PROJECT_ROOT / "data" / "tasks.db"
+_DB_PATH_ENV: str = "TASK_BOT_DB_PATH"
+DB_PATH: Path = (
+    Path(os.environ[_DB_PATH_ENV]).expanduser().resolve()
+    if os.getenv(_DB_PATH_ENV)
+    else PROJECT_ROOT / "data" / "tasks.db"
+)
 
 _SCHEMA_SQL: str = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -46,6 +59,13 @@ CREATE TABLE IF NOT EXISTS modules (
 );
 """
 
+_TASK_INSERT_SQL: str = """
+INSERT INTO tasks
+    (title, task_type, module_code, due_date, due_time,
+     week_number, notes, completed, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply additive schema changes that ``CREATE TABLE IF NOT EXISTS`` can't.
@@ -69,8 +89,10 @@ def _get_conn() -> Iterator[sqlite3.Connection]:
     Row access is named (``sqlite3.Row``). Commits on clean exit, rolls back
     on exception, and always closes the underlying connection.
     """
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
     try:
         yield conn
         conn.commit()
@@ -130,26 +152,38 @@ def add_task(task: Task) -> int:
 
     Ignores ``task.id`` and ``task.created_at`` on input — the DB assigns both.
     """
+    return add_tasks([task])[0]
+
+
+def add_tasks(tasks: list[Task]) -> list[int]:
+    """Insert ``tasks`` in one transaction and return their new row ids.
+
+    Used by seed/stress paths where opening one SQLite connection per row is
+    unnecessarily slow. ``add_task`` remains the simple single-row wrapper used
+    by interactive Telegram handlers.
+    """
+    if not tasks:
+        return []
     created_at = datetime.now().isoformat(timespec="seconds")
+    ids: list[int] = []
     with _get_conn() as conn:
-        cur = conn.execute(
-            """INSERT INTO tasks
-                 (title, task_type, module_code, due_date, due_time,
-                  week_number, notes, completed, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                task.title,
-                task.task_type,
-                task.module_code,
-                task.due_date.isoformat(),
-                task.due_time,
-                task.week_number,
-                task.notes,
-                1 if task.completed else 0,
-                created_at,
-            ),
-        )
-        return int(cur.lastrowid)
+        for task in tasks:
+            cur = conn.execute(
+                _TASK_INSERT_SQL,
+                (
+                    task.title,
+                    task.task_type,
+                    task.module_code,
+                    task.due_date.isoformat(),
+                    task.due_time,
+                    task.week_number,
+                    task.notes,
+                    1 if task.completed else 0,
+                    created_at,
+                ),
+            )
+            ids.append(int(cur.lastrowid))
+    return ids
 
 
 def get_task(task_id: int) -> Optional[Task]:
@@ -212,7 +246,7 @@ def get_tasks_for_date(target_date: date) -> list[Task]:
         rows = conn.execute(
             """SELECT * FROM tasks
                WHERE due_date = ?
-               ORDER BY task_type, title""",
+               ORDER BY task_type, due_time IS NULL, due_time, title""",
             (target_date.isoformat(),),
         ).fetchall()
     return [_row_to_task(r) for r in rows]
@@ -232,7 +266,7 @@ def get_tasks_for_week(
         placeholders = ",".join("?" * len(task_types))
         query += f" AND task_type IN ({placeholders})"
         params.extend(task_types)
-    query += " ORDER BY due_date, task_type, title"
+    query += " ORDER BY due_date, due_time IS NULL, due_time, task_type, title"
     with _get_conn() as conn:
         rows = conn.execute(query, params).fetchall()
     return [_row_to_task(r) for r in rows]
@@ -244,7 +278,7 @@ def get_semester_deadlines() -> list[Task]:
         rows = conn.execute(
             """SELECT * FROM tasks
                WHERE task_type IN ('midterm', 'final')
-               ORDER BY due_date""",
+               ORDER BY due_date, due_time IS NULL, due_time, title""",
         ).fetchall()
     return [_row_to_task(r) for r in rows]
 
@@ -255,7 +289,7 @@ def get_all_pending() -> list[Task]:
         rows = conn.execute(
             """SELECT * FROM tasks
                WHERE completed = 0
-               ORDER BY due_date""",
+               ORDER BY due_date, due_time IS NULL, due_time, title""",
         ).fetchall()
     return [_row_to_task(r) for r in rows]
 

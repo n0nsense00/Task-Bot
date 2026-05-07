@@ -6,9 +6,10 @@ Usage (from the project root with the venv active):
     python seed/seed_tasks.py --replace        # wipe all existing tasks first (prompts y/n)
     python seed/seed_tasks.py --file path.csv  # load from a different CSV
 
-The CSV must have the exact header row:
+The CSV must have one of these header rows:
 
     title,task_type,module_code,due_date,week_number,notes
+    title,task_type,module_code,due_date,due_time,week_number,notes
 
 Lines whose first non-whitespace character is ``#`` are comments and skipped;
 so are blank lines. The header row must be the first non-comment line.
@@ -32,7 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from database.db import (  # noqa: E402  (sys.path hack above is intentional)
-    add_task,
+    add_tasks,
     count_tasks,
     delete_all_tasks,
     init_db,
@@ -43,7 +44,7 @@ from database.models import (  # noqa: E402
     Task,
 )
 
-EXPECTED_COLUMNS: tuple[str, ...] = (
+BASE_COLUMNS: tuple[str, ...] = (
     "title",
     "task_type",
     "module_code",
@@ -51,6 +52,16 @@ EXPECTED_COLUMNS: tuple[str, ...] = (
     "week_number",
     "notes",
 )
+TIME_COLUMNS: tuple[str, ...] = (
+    "title",
+    "task_type",
+    "module_code",
+    "due_date",
+    "due_time",
+    "week_number",
+    "notes",
+)
+ACCEPTED_COLUMNS: tuple[tuple[str, ...], ...] = (BASE_COLUMNS, TIME_COLUMNS)
 DEFAULT_CSV_PATH: Path = _PROJECT_ROOT / "seed" / "seed_data.csv"
 
 _PLURAL_LABEL: dict[str, str] = {
@@ -101,10 +112,11 @@ def _read_rows(path: Path) -> list[_RawRow]:
     data_entries = kept[1:]
 
     reader = csv.DictReader([header_line] + [ln for _, ln in data_entries])
-    if tuple(reader.fieldnames or ()) != EXPECTED_COLUMNS:
+    fieldnames = tuple(reader.fieldnames or ())
+    if fieldnames not in ACCEPTED_COLUMNS:
         raise ValueError(
-            "CSV header must be exactly: "
-            + ",".join(EXPECTED_COLUMNS)
+            "CSV header must be one of:\n  "
+            + "\n  ".join(",".join(columns) for columns in ACCEPTED_COLUMNS)
             + f"\n  got: {reader.fieldnames}"
         )
 
@@ -122,6 +134,7 @@ def _validate_row(raw: _RawRow) -> Task:
       - task_type: one of ``TASK_TYPES``
       - module_code: required unless task_type is 'personal'
       - due_date: parseable as ``YYYY-MM-DD``
+      - due_time: blank, or ``HH:MM`` 24-hour time
       - week_number: blank, or integer 1..13
       - notes: any string, or blank
     """
@@ -154,6 +167,26 @@ def _validate_row(raw: _RawRow) -> Task:
             f"due_date {due_raw!r} is not valid YYYY-MM-DD"
         ) from None
 
+    due_time = (data.get("due_time") or "").strip() or None
+    if due_time is not None:
+        try:
+            hour_str, minute_str = due_time.split(":", 1)
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except ValueError:
+            raise ValueError(
+                f"due_time {due_time!r} is not valid HH:MM"
+            ) from None
+        if not (
+            len(hour_str) == 2
+            and len(minute_str) == 2
+            and 0 <= hour <= 23
+            and 0 <= minute <= 59
+        ):
+            raise ValueError(
+                f"due_time {due_time!r} is not valid HH:MM"
+            )
+
     week_raw = (data.get("week_number") or "").strip()
     week_number: int | None
     if week_raw:
@@ -177,6 +210,7 @@ def _validate_row(raw: _RawRow) -> Task:
         task_type=task_type,
         module_code=module_code,
         due_date=due,
+        due_time=due_time,
         week_number=week_number,
         notes=notes,
     )
@@ -255,8 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         deleted = delete_all_tasks()
         print(f"Deleted {deleted} existing tasks.")
 
-    for task in tasks:
-        add_task(task)
+    add_tasks(tasks)
 
     print(_summary(tasks))
     return 0
