@@ -7,9 +7,8 @@ without having to tap around blindly.
 
 ``/clear`` wipes the visible chat history with the bot — both bot-sent
 messages and the user's own commands and replies — by iterating through
-the tracked-message list maintained in ``bot_data['tracked_messages']``
-(populated by the wrap installed in :mod:`bot._install_message_tracker`
-plus the group-1 incoming-message tracker). Telegram's 48-hour
+the tracked-message list maintained by :class:`utils.tracking_bot.TrackingBot`
+plus the group-1 incoming-message tracker. Telegram's 48-hour
 deletion window means anything older than that can't be removed; the
 confirmation message reports the count and self-deletes after 5 seconds.
 """
@@ -25,6 +24,12 @@ from telegram.ext import ContextTypes
 from utils.auth import authorized_only
 from utils.errors import safe
 from utils.format import DIVIDER, todays_tip
+from utils.tracking_bot import (
+    append_tracked_message,
+    get_tracked_messages,
+    replace_tracked_messages,
+    set_skip_tracking,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +137,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = chat.id
 
-    tracked = context.bot_data.get("tracked_messages", [])
+    tracked = get_tracked_messages(context.bot)
     to_delete: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     for c, m in tracked:
@@ -165,13 +170,13 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Drop this chat's entries from tracking — succeeded or not, we shouldn't
     # keep retrying these.
-    context.bot_data["tracked_messages"] = [
+    replace_tracked_messages(context.bot, [
         (c, m) for c, m in tracked if c != chat_id
-    ]
+    ])
 
     # Send a self-deleting confirmation. Skip tracking it (otherwise the
     # next /clear would inherit a stale id).
-    context.bot_data["_skip_tracking"] = True
+    set_skip_tracking(context.bot, True)
     try:
         text = f"🧹 Cleared {deleted} message{'s' if deleted != 1 else ''}."
         if failed:
@@ -183,7 +188,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=chat_id, text=text, parse_mode=ParseMode.HTML
         )
     finally:
-        context.bot_data["_skip_tracking"] = False
+        set_skip_tracking(context.bot, False)
 
     async def _delete_confirmation_later() -> None:
         """Auto-delete the /clear confirmation after the TTL elapses."""
@@ -214,5 +219,4 @@ async def track_incoming_message(
     message = update.effective_message
     if message is None or message.chat_id is None:
         return
-    tracked = context.bot_data.setdefault("tracked_messages", [])
-    tracked.append((message.chat_id, message.message_id))
+    append_tracked_message(context.bot, message.chat_id, message.message_id)

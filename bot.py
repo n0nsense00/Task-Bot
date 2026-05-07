@@ -63,6 +63,7 @@ from handlers.tasks import (
     week,
 )
 from scheduler import build_scheduler, catch_up_missed_brief
+from utils.tracking_bot import TrackingBot
 
 logger = logging.getLogger(__name__)
 
@@ -110,35 +111,6 @@ def _get_build_identifier() -> str:
     return "unknown"
 
 
-def _install_message_tracker(application: Application) -> None:
-    """Wrap ``application.bot.send_message`` so /clear can find tracked messages.
-
-    Every successful send is recorded as a ``(chat_id, message_id)`` tuple in
-    ``bot_data['tracked_messages']``. Tracking can be temporarily skipped by
-    setting ``bot_data['_skip_tracking'] = True`` around a send (used by
-    /clear's own confirmation, which we don't want to pollute future runs).
-
-    The wrap replaces the instance-level method only, so PTB's class-level
-    behaviour stays intact and :func:`Message.reply_text`,
-    :func:`scheduler.send_morning_brief`, and any other path that ultimately
-    calls ``bot.send_message`` is captured uniformly.
-    """
-    original_send = application.bot.send_message
-
-    async def _tracked_send(*args, **kwargs):
-        msg = await original_send(*args, **kwargs)
-        if (
-            msg is not None
-            and not application.bot_data.get("_skip_tracking", False)
-        ):
-            tracked = application.bot_data.setdefault("tracked_messages", [])
-            tracked.append((msg.chat_id, msg.message_id))
-        return msg
-
-    application.bot.send_message = _tracked_send
-    logger.info("Message tracker installed (wrap of bot.send_message)")
-
-
 def _bot_command_menu() -> list[BotCommand]:
     """Return the list registered with Telegram as the '/' suggestion menu.
 
@@ -161,8 +133,8 @@ def _bot_command_menu() -> list[BotCommand]:
 
 
 async def _post_init(application: Application) -> None:
-    """Install message tracker, register Telegram command menu, start scheduler."""
-    _install_message_tracker(application)
+    """Register Telegram command menu and start scheduler."""
+    logger.info("Message tracker active (TrackingBot.send_message override)")
 
     try:
         await application.bot.set_my_commands(_bot_command_menu())
@@ -200,7 +172,7 @@ def main() -> None:
 
     application = (
         Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
+        .bot(TrackingBot(token=TELEGRAM_BOT_TOKEN))
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
@@ -242,9 +214,9 @@ def main() -> None:
     # because PTB runs the first matching handler in group 0.
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
-    # Group-1 message tracker for /clear: records every incoming message ID
-    # in bot_data['tracked_messages']. Lives in a separate group so it runs
-    # alongside (not in competition with) the group-0 handlers above.
+    # Group-1 message tracker for /clear: records every incoming message ID.
+    # Lives in a separate group so it runs alongside (not in competition with)
+    # the group-0 handlers above.
     application.add_handler(
         MessageHandler(filters.ALL, track_incoming_message), group=1
     )
