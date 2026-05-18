@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import Update
-from telegram.constants import ParseMode
+from telegram import Message, Update
+from telegram.constants import ChatType, MessageEntityType, ParseMode
 from telegram.ext import ContextTypes
 
 from utils.auth import admin_only, authorized_only
@@ -206,17 +206,94 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         application.create_task(_delete_confirmation_later())
 
 
+def _is_bot_related_message(message: Message, bot_id: int, bot_username: str) -> bool:
+    """Return True if ``message`` constitutes interaction with this bot.
+
+    Bounds what /clear is allowed to touch. Without this filter, an admin
+    bot in a group would receive every member's message (Telegram disables
+    privacy mode for admin bots), the tracker would record all of them,
+    and /clear would nuke 48h of unrelated chitchat. The four conditions:
+
+    1. Private (DM) chat — the entire conversation is with the bot.
+    2. Slash command directed at this bot — either untargeted ("/today")
+       or explicitly targeted ("/today@CharlieKirkBot"). Commands carrying
+       a different bot's @suffix are ignored (they belong to that bot).
+    3. Reply to a message previously sent by this bot — typical follow-up
+       interaction with one of the bot's cards.
+    4. Free-text message that @-mentions this bot's username.
+
+    Captions (on photo/video/document messages) are intentionally NOT
+    inspected: PTB's CommandHandler only matches commands in ``text``, so
+    a "/add" inside a caption isn't actually treated as a command and
+    shouldn't be tracked as if it were.
+    """
+    chat = message.chat
+    if chat is None:
+        return False
+
+    # (1) DMs with the bot — every message is bot-related by definition.
+    if chat.type == ChatType.PRIVATE:
+        return True
+
+    text = message.text or ""
+
+    # (2) Slash command targeted at us (or untargeted, which Telegram
+    # delivers to all bots in the chat — still legitimately ours).
+    if text.startswith("/"):
+        first_token = text.split(maxsplit=1)[0]
+        if "@" not in first_token:
+            return True
+        if bot_username and first_token.lower().endswith(
+            f"@{bot_username.lower()}"
+        ):
+            return True
+
+    # (3) Reply to one of our messages.
+    reply = message.reply_to_message
+    if (
+        reply is not None
+        and reply.from_user is not None
+        and reply.from_user.id == bot_id
+    ):
+        return True
+
+    # (4) @-mention of the bot's username inside the message text.
+    if message.entities and bot_username:
+        for entity in message.entities:
+            if entity.type != MessageEntityType.MENTION:
+                continue
+            mentioned = text[entity.offset : entity.offset + entity.length]
+            if mentioned.lstrip("@").lower() == bot_username.lower():
+                return True
+
+    return False
+
+
 async def track_incoming_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Group-1 catch-all: record every incoming user message ID.
+    """Group-1 catch-all: record bot-related incoming messages for /clear.
 
     Registered in :func:`bot.main` at ``group=1`` so it runs *after* every
     group-0 handler for the same update. This means /clear (which lives in
     group 0) can read a tracked-list that excludes its own command — the
     /clear handler manually adds its own id before deletion.
+
+    Filters via :func:`_is_bot_related_message` so /clear stays bounded
+    even if the bot is later promoted to admin in a shared group (where
+    Telegram would otherwise feed it every member's message).
     """
     message = update.effective_message
-    if message is None or message.chat_id is None:
+    chat = update.effective_chat
+    if message is None or chat is None:
         return
-    append_tracked_message(context.bot, message.chat_id, message.message_id)
+
+    bot = context.bot
+    if not _is_bot_related_message(
+        message,
+        bot_id=bot.id,
+        bot_username=bot.username or "",
+    ):
+        return
+
+    append_tracked_message(bot, chat.id, message.message_id)
