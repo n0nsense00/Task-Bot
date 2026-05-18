@@ -34,6 +34,8 @@ from config import (
     CMD_DELETE,
     CMD_DONE,
     CMD_HELP,
+    CMD_KILL,
+    CMD_REVIVE,
     CMD_SEMESTER,
     CMD_START,
     CMD_TODAY,
@@ -42,6 +44,7 @@ from config import (
 )
 from database.db import init_db
 from handlers.add_task import build_add_conversation
+from handlers.admin import kill_cmd, revive_cmd
 from handlers.basic import (
     clear,
     help_command,
@@ -126,7 +129,6 @@ def _bot_command_menu() -> list[BotCommand]:
         BotCommand(CMD_ADD, "Add a new task"),
         BotCommand(CMD_DONE, "Mark a task done by id"),
         BotCommand(CMD_DELETE, "Delete a task by id"),
-        BotCommand(CMD_CLEAR, "Wipe this chat (last 48h)"),
         BotCommand(CMD_CANCEL, "Cancel current /add or /edit flow"),
         BotCommand(CMD_HELP, "Show command list"),
         BotCommand(CMD_START, "Welcome message"),
@@ -189,6 +191,10 @@ def main() -> None:
     application.add_handler(CommandHandler(CMD_DONE, done_task_cmd))
     application.add_handler(CommandHandler(CMD_DELETE, delete_task_cmd))
     application.add_handler(CommandHandler(CMD_CLEAR, clear))
+    # Owner-only kill switch. Not added to _bot_command_menu — these stay
+    # hidden from the public '/' suggestion list. The owner just types them.
+    application.add_handler(CommandHandler(CMD_KILL, kill_cmd))
+    application.add_handler(CommandHandler(CMD_REVIVE, revive_cmd))
 
     # Conversation handlers — must register BEFORE bare CallbackQueryHandlers
     # so their state-scoped callbacks claim updates ahead of the global ones.

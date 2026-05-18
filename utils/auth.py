@@ -22,6 +22,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config import ALLOWED_CHAT_ID, MY_TELEGRAM_ID
+from utils.kill_switch import is_killed
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,15 @@ HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
 def authorized_only(func: HandlerFunc) -> HandlerFunc:
     """Restrict a handler to the allowed group chat.
 
-    Wraps an async PTB handler. If the incoming update's effective chat is
-    not ``ALLOWED_CHAT_ID``, the call is logged at WARNING (with the chat
-    id and type, so a fresh deployment can discover the right group id from
-    its own logs) and silently dropped.
+    Wraps an async PTB handler. Updates are silently dropped if either:
+    (a) the effective chat is not ``ALLOWED_CHAT_ID`` — logged at WARNING
+        with chat id/type so a fresh deployment can read the group id from
+        its own logs; or
+    (b) the kill switch is engaged (see :mod:`utils.kill_switch`) — logged
+        at DEBUG only, since this is an expected owner-driven silence.
+
+    Admin-only handlers use ``admin_only`` instead, which deliberately
+    bypasses the kill switch so the owner can still ``/revive``.
     """
 
     @wraps(func)
@@ -48,6 +54,14 @@ def authorized_only(func: HandlerFunc) -> HandlerFunc:
                 getattr(chat, "type", None),
                 getattr(user, "id", None),
                 getattr(user, "username", None),
+            )
+            return None
+        if is_killed():
+            user = update.effective_user
+            logger.debug(
+                "Playing dead — pretending not to hear %s (id=%s)",
+                getattr(user, "username", None),
+                getattr(user, "id", None),
             )
             return None
         return await func(update, context)
