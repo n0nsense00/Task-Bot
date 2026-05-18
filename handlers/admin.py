@@ -67,6 +67,6 @@ async def revive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     await message.reply_text(
-        "🟢<b>Charlie Kirk at your service.</b>",
+        "🟢 <b>Charlie Kirk at your service.</b>",
         parse_mode=ParseMode.HTML,
     )
