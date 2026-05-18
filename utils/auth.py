@@ -1,16 +1,20 @@
 """Authorization decorators for Task-Bot.
 
-The bot is restricted to a single group chat (``ALLOWED_CHAT_ID``). Every
-update from any other chat — DMs, other groups, channels — is silently
-dropped. We deliberately do not reply, so outsiders cannot confirm the bot
-exists or that they hit a guarded handler.
+Access model:
+- The bot owner (``MY_TELEGRAM_ID``) can use the bot **anywhere** — including
+  in private DMs with it — for personal use.
+- Any other user can only use the bot inside the allowed group chat
+  (``ALLOWED_CHAT_ID``). DMs, other groups, channels — all silently dropped.
+- The kill switch (``utils.kill_switch``) silences non-owner users only;
+  the owner always retains control so they can ``/revive``.
 
 Two decorators:
 
-- ``authorized_only``: the default gate. Any member of the allowed group can
-  call the wrapped handler.
-- ``admin_only``: stricter gate for destructive commands. Requires both the
-  allowed chat AND the bot owner (``MY_TELEGRAM_ID``).
+- ``authorized_only``: the default gate. Lets through (a) any message from
+  the allowed group, OR (b) any message from the owner anywhere. Honors the
+  kill switch for non-owners.
+- ``admin_only``: stricter gate for destructive commands. Owner only,
+  anywhere. Bypasses the kill switch by design.
 """
 from __future__ import annotations
 
@@ -30,34 +34,37 @@ HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
 
 
 def authorized_only(func: HandlerFunc) -> HandlerFunc:
-    """Restrict a handler to the allowed group chat.
+    """Restrict a handler to the allowed group chat OR the owner anywhere.
 
-    Wraps an async PTB handler. Updates are silently dropped if either:
-    (a) the effective chat is not ``ALLOWED_CHAT_ID`` — logged at WARNING
-        with chat id/type so a fresh deployment can read the group id from
-        its own logs; or
-    (b) the kill switch is engaged (see :mod:`utils.kill_switch`) — logged
-        at DEBUG only, since this is an expected owner-driven silence.
+    Wraps an async PTB handler. The update passes if either:
+    (a) it comes from the owner (``MY_TELEGRAM_ID``) — they can use the bot
+        in DMs, in the group, anywhere; or
+    (b) it comes from the allowed group chat (``ALLOWED_CHAT_ID``).
 
-    Admin-only handlers use ``admin_only`` instead, which deliberately
-    bypasses the kill switch so the owner can still ``/revive``.
+    Updates failing both checks are logged at WARNING (with chat/user ids
+    so a fresh deployment can discover the group id from logs) and dropped.
+
+    The kill switch (see :mod:`utils.kill_switch`) silences non-owner users
+    only — the owner always gets through, so they can ``/revive`` from
+    anywhere. ``admin_only`` is the stricter gate for destructive commands.
     """
 
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
         chat = update.effective_chat
-        if chat is None or chat.id != ALLOWED_CHAT_ID:
-            user = update.effective_user
+        user = update.effective_user
+        is_owner = user is not None and user.id == MY_TELEGRAM_ID
+        in_allowed_chat = chat is not None and chat.id == ALLOWED_CHAT_ID
+        if not (is_owner or in_allowed_chat):
             logger.warning(
-                "Unauthorized chat: chat_id=%s chat_type=%s user_id=%s username=%s",
+                "Unauthorized: chat_id=%s chat_type=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
                 getattr(chat, "type", None),
                 getattr(user, "id", None),
                 getattr(user, "username", None),
             )
             return None
-        if is_killed():
-            user = update.effective_user
+        if is_killed() and not is_owner:
             logger.debug(
                 "Playing dead — pretending not to hear %s (id=%s)",
                 getattr(user, "username", None),
@@ -70,24 +77,22 @@ def authorized_only(func: HandlerFunc) -> HandlerFunc:
 
 
 def admin_only(func: HandlerFunc) -> HandlerFunc:
-    """Restrict a handler to the bot owner inside the allowed group chat.
+    """Restrict a handler to the bot owner, anywhere.
 
-    Both conditions must hold: the update must come from ``ALLOWED_CHAT_ID``
-    AND from ``MY_TELEGRAM_ID``. Use for destructive commands that even
-    trusted group members shouldn't be able to invoke (e.g. ``/clear``).
-    Failures are logged at WARNING and silently dropped.
+    The update must come from ``MY_TELEGRAM_ID``. Chat location doesn't
+    matter — the owner can run admin commands in the group, in their DM
+    with the bot, or anywhere else they have access. Use for destructive
+    commands that even trusted group members shouldn't invoke (e.g.
+    ``/clear``, ``/kill``, ``/revive``). Bypasses the kill switch by
+    design so the owner always retains control. Failures are logged at
+    WARNING and silently dropped.
     """
 
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
         chat = update.effective_chat
         user = update.effective_user
-        if (
-            chat is None
-            or chat.id != ALLOWED_CHAT_ID
-            or user is None
-            or user.id != MY_TELEGRAM_ID
-        ):
+        if user is None or user.id != MY_TELEGRAM_ID:
             logger.warning(
                 "Admin-only refused: chat_id=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
