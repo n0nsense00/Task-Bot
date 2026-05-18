@@ -90,6 +90,7 @@ Fill in:
 ```env
 TELEGRAM_BOT_TOKEN=your_token_from_botfather
 MY_TELEGRAM_ID=your_numeric_telegram_user_id
+# ALLOWED_CHAT_ID=-1001234567890   # optional; leave unset for discovery mode (see .env.example)
 ```
 
 Run the bot:

@@ -37,8 +37,34 @@ def _require_int(name: str) -> int:
         ) from exc
 
 
+def _optional_int(name: str, default: int) -> int:
+    """Return env var ``name`` cast to int, or ``default`` if unset/empty.
+
+    Raises ``RuntimeError`` if set but not a valid integer — silent default
+    on a typo would be worse than failing fast.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable {name} must be a valid integer, got: {raw!r}"
+        ) from exc
+
+
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 MY_TELEGRAM_ID: int = _require_int("MY_TELEGRAM_ID")
+# Numeric Telegram chat ID of the group the bot is restricted to. Updates from
+# any other chat (DMs, other groups, channels) are dropped at the auth
+# decorator. Group IDs are negative — supergroups start with -100...
+#
+# Optional: if unset (or set to 0), the bot starts in "discovery mode" and
+# rejects every incoming message — but each rejection is logged with the
+# chat id, so you can spin up the bot, send one message in the target group,
+# read the chat id from the logs, then set ALLOWED_CHAT_ID and redeploy.
+ALLOWED_CHAT_ID: int = _optional_int("ALLOWED_CHAT_ID", 0)
 
 CMD_START: str = "start"
 CMD_HELP: str = "help"

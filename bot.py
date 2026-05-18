@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 
 from config import (
+    ALLOWED_CHAT_ID,
     CMD_ADD,
     CMD_BRIEF,
     CMD_CANCEL,
@@ -228,6 +229,14 @@ def main() -> None:
     logger.info(
         "Task-Bot starting (polling mode, build=%s)", _get_build_identifier()
     )
+    if ALLOWED_CHAT_ID == 0:
+        logger.warning(
+            "ALLOWED_CHAT_ID is unset — bot is in DISCOVERY MODE: every "
+            "incoming message will be rejected and its chat id logged. Add "
+            "the bot to the target group, send a message, copy the chat_id "
+            "from the next 'Unauthorized chat' warning into the env var, and "
+            "restart."
+        )
     try:
         application.run_polling()
     except KeyboardInterrupt:

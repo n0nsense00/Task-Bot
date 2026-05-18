@@ -21,7 +21,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from utils.auth import authorized_only
+from utils.auth import admin_only, authorized_only
 from utils.errors import safe
 from utils.format import DIVIDER, todays_tip
 from utils.tracking_bot import (
@@ -119,7 +119,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 _CLEAR_CONFIRMATION_TTL_SECONDS: int = 5
 
 
-@authorized_only
+@admin_only
 @safe
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ``/clear``: delete every tracked bot/user message in this chat.

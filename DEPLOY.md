@@ -15,8 +15,12 @@ start to finish.
 
 - A [Railway](https://railway.app) account.
 - The Task-Bot repo pushed to GitHub (the one at `github.com/n0nsense00/Task-Bot`).
-- Your `TELEGRAM_BOT_TOKEN` and `MY_TELEGRAM_ID` from Phase 2 setup — same
-  values that live in your local `.env`.
+- Your `TELEGRAM_BOT_TOKEN` and `MY_TELEGRAM_ID` from initial setup.
+- (Optional, can be set later) `ALLOWED_CHAT_ID` — the numeric ID of the
+  group chat the bot is restricted to. If you don't have this yet, leave it
+  unset for the first deploy: the bot starts in "discovery mode" and logs
+  the chat id of every rejected message so you can pick it up from Railway
+  logs. See `.env.example` for the full discovery procedure.
 
 ## 1. Create a Railway project from GitHub
 
@@ -37,11 +41,12 @@ Railway reads `Procfile` and `runtime.txt` automatically:
 
 In your Railway project, open the **Variables** tab and add:
 
-| Variable              | Value                                             |
-| --------------------- | ------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN`  | Your bot token from @BotFather.                   |
-| `MY_TELEGRAM_ID`      | Your numeric Telegram user ID.                    |
-| `TIMEZONE` (optional) | IANA tz name. Defaults to `Asia/Singapore` unset. |
+| Variable                     | Value                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`         | Your bot token from @BotFather.                                                                                                             |
+| `MY_TELEGRAM_ID`             | Your numeric Telegram user ID. Used as the admin gate for `/clear`.                                                                         |
+| `ALLOWED_CHAT_ID` (optional) | Numeric chat ID of the group the bot is restricted to (negative int). Leave unset for "discovery mode" — chat ids of rejected msgs get logged. |
+| `TIMEZONE` (optional)        | IANA tz name. Defaults to `Asia/Singapore` unset.                                                                                           |
 
 Do **not** commit these to git. They only live in Railway.
 

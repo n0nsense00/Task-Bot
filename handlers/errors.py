@@ -17,10 +17,11 @@ _UNKNOWN_COMMAND_MESSAGE: str = "Unknown command. Try /help"
 @authorized_only
 @safe
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Respond to unrecognized commands from the owner with a pointer to /help.
+    """Respond to unrecognized commands inside the allowed group with /help hint.
 
-    Outsiders never reach this — ``@authorized_only`` drops their updates
-    silently, preserving the "bot doesn't exist" illusion.
+    Outsiders never reach this — ``@authorized_only`` drops updates from any
+    chat other than ``ALLOWED_CHAT_ID`` silently, preserving the "bot doesn't
+    exist" illusion.
     """
     message = update.effective_message
     if message is None:
