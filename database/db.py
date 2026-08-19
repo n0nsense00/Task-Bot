@@ -51,13 +51,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     module_code TEXT,
     due_date    TEXT    NOT NULL,
     due_time    TEXT,
-    week_number INTEGER,
     notes       TEXT,
     completed   INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
     created_at  TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON tasks(due_date);
-CREATE INDEX IF NOT EXISTS idx_tasks_week_number ON tasks(week_number);
 CREATE INDEX IF NOT EXISTS idx_tasks_type        ON tasks(task_type);
 
 CREATE TABLE IF NOT EXISTS modules (
@@ -69,8 +67,8 @@ CREATE TABLE IF NOT EXISTS modules (
 _TASK_INSERT_SQL: str = """
 INSERT INTO tasks
     (chat_id, title, task_type, module_code, due_date, due_time,
-     week_number, notes, completed, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     notes, completed, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -135,7 +133,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                 module_code TEXT,
                 due_date    TEXT    NOT NULL,
                 due_time    TEXT,
-                week_number INTEGER,
                 notes       TEXT,
                 completed   INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
                 created_at  TEXT    NOT NULL
@@ -144,15 +141,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             """INSERT INTO tasks
                 (id, chat_id, title, task_type, module_code, due_date, due_time,
-                 week_number, notes, completed, created_at)
+                 notes, completed, created_at)
                SELECT id, chat_id, title, task_type, module_code, due_date, due_time,
-                      week_number, notes, completed, created_at
+                      notes, completed, created_at
                  FROM tasks_legacy"""
         )
         conn.execute("DROP TABLE tasks_legacy")
         conn.execute("CREATE INDEX idx_tasks_due_date ON tasks(due_date)")
-        conn.execute("CREATE INDEX idx_tasks_week_number ON tasks(week_number)")
         conn.execute("CREATE INDEX idx_tasks_type ON tasks(task_type)")
+
+    # week_number is gone from the data model. Drop it from databases created
+    # before that change. The column list is re-read here because the rebuild
+    # above may have just replaced the table. SQLite refuses to drop an
+    # indexed column, so the index goes first.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "week_number" in existing:
+        logger.info("Migrating: dropping unused week_number column")
+        conn.execute("DROP INDEX IF EXISTS idx_tasks_week_number")
+        conn.execute("ALTER TABLE tasks DROP COLUMN week_number")
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_chat_due "
@@ -198,7 +204,6 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         task_type=row["task_type"],
         module_code=row["module_code"],
         due_date=date.fromisoformat(row["due_date"]),
-        week_number=row["week_number"],
         notes=row["notes"],
         completed=bool(row["completed"]),
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -261,7 +266,6 @@ def add_tasks(tasks: list[Task]) -> list[int]:
                     task.module_code,
                     task.due_date.isoformat(),
                     task.due_time,
-                    task.week_number,
                     task.notes,
                     1 if task.completed else 0,
                     created_at,
@@ -295,7 +299,7 @@ def update_task(task: Task) -> bool:
         cur = conn.execute(
             """UPDATE tasks
                  SET title = ?, task_type = ?, module_code = ?, due_date = ?,
-                     due_time = ?, week_number = ?, notes = ?, completed = ?
+                     due_time = ?, notes = ?, completed = ?
                WHERE id = ? AND chat_id = ?""",
             (
                 task.title,
@@ -303,7 +307,6 @@ def update_task(task: Task) -> bool:
                 task.module_code,
                 task.due_date.isoformat(),
                 task.due_time,
-                task.week_number,
                 task.notes,
                 1 if task.completed else 0,
                 task.id,
@@ -397,32 +400,6 @@ def delete_all_tasks(chat_id: int) -> int:
         cur = conn.execute("DELETE FROM tasks WHERE chat_id = ?", (chat_id,))
         return cur.rowcount
 
-
-def cleanup_past_deadlines(today: date, chat_id: int) -> int:
-    """Delete every midterm/final whose ``due_date`` is strictly before ``today``.
-
-    Scope is intentionally narrow — only ``midterm`` and ``final`` rows are
-    auto-purged, because those are the "big deadlines" the owner actively
-    wants to disappear after the date passes. Lectures, tutorials,
-    assignments, and personal tasks are left alone (manual ``/delete`` only).
-
-    Retained as a narrow database maintenance helper for older data.
-    """
-    today_iso = today.isoformat()
-    with _get_conn() as conn:
-        cur = conn.execute(
-            """DELETE FROM tasks
-               WHERE task_type IN ('midterm', 'final')
-                 AND chat_id = ?
-                 AND due_date < ?""",
-            (chat_id, today_iso),
-        )
-        return cur.rowcount
-
-
-# ---------------------------------------------------------------------------
-# Modules table — populated from seed/seed_modules.csv
-# ---------------------------------------------------------------------------
 
 def get_modules() -> list[Module]:
     """Return every module the user has seeded, sorted by code."""

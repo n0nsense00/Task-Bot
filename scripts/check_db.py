@@ -56,7 +56,6 @@ def run_check() -> None:
             due_date=today,
             due_time="09:00",
             module_code="CS2040",
-            week_number=1,
             chat_id=personal_chat_id,
         )
         late_assignment = Task(
@@ -65,7 +64,6 @@ def run_check() -> None:
             due_date=today,
             due_time="23:59",
             module_code="CS2040",
-            week_number=1,
             notes="Submit before midnight.",
             chat_id=personal_chat_id,
         )
@@ -74,7 +72,6 @@ def run_check() -> None:
             task_type=TASK_TYPE_QUIZ,
             due_date=tomorrow,
             module_code="MH2100",
-            week_number=1,
             chat_id=personal_chat_id,
         )
         old_midterm = Task(
@@ -83,7 +80,6 @@ def run_check() -> None:
             due_date=yesterday,
             due_time="18:30",
             module_code="CS2040",
-            week_number=1,
             chat_id=personal_chat_id,
         )
         group_quiz = Task(
@@ -130,15 +126,12 @@ def run_check() -> None:
             t.id for t in db.get_semester_deadlines(group_chat_id)
         } == {group_quiz_id}
 
-        removed_deadlines = db.cleanup_past_deadlines(today, personal_chat_id)
-        assert removed_deadlines == 1
-        assert db.get_task(old_midterm_id, personal_chat_id) is None
-
         assert not db.delete_task(group_quiz_id, personal_chat_id)
         assert db.delete_task(group_quiz_id, group_chat_id)
         assert db.delete_task(quiz_id, personal_chat_id)
         assert db.delete_task(late_id, personal_chat_id)
         assert db.delete_task(early_id, personal_chat_id)
+        assert db.delete_task(old_midterm_id, personal_chat_id)
         assert db.count_tasks() == 0
 
         _print_result("temporary_db", db.DB_PATH)
