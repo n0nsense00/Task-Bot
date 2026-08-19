@@ -32,6 +32,7 @@ from config import (
 )
 from database.db import get_semester_deadlines
 from database.models import Task
+from utils.clock import today_local
 from utils.format import (
     DIVIDER,
     days_away_label,
@@ -67,14 +68,13 @@ def _resolve_timezone() -> ZoneInfo:
         return ZoneInfo("Asia/Singapore")
 
 
-def _upcoming_deadlines(chat_id: int) -> list[Task]:
+def _upcoming_deadlines(chat_id: int, today: date) -> list[Task]:
     """Return up to ``_UPCOMING_LIMIT`` upcoming deadlines within the window.
 
     "Upcoming" means ``today <= due_date <= today + _UPCOMING_WINDOW_DAYS``.
     :func:`get_semester_deadlines` already sorts by ``due_date`` ascending, so
     slicing the filtered list preserves chronological order.
     """
-    today = date.today()
     window_end_ord = today.toordinal() + _UPCOMING_WINDOW_DAYS
     candidates = [
         t
@@ -92,11 +92,11 @@ def build_morning_brief(chat_id: int) -> str:
     when there is nothing due today AND no upcoming deadlines in the next
     fortnight, so the morning push doesn't pester the user with empty lists.
     """
-    today = date.today()
+    today = today_local()
     tasks = [
         t for t in get_semester_deadlines(chat_id) if t.due_date == today
     ]
-    upcoming = _upcoming_deadlines(chat_id)
+    upcoming = _upcoming_deadlines(chat_id, today)
 
     if not tasks and not upcoming:
         return _CLEAR_DAY_MESSAGE
@@ -117,7 +117,7 @@ def build_morning_brief(chat_id: int) -> str:
         for t in upcoming:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
-            relative = days_away_label(t.due_date)
+            relative = days_away_label(t.due_date, today)
             time_clause = f" at {t.due_time}" if t.due_time else ""
             lines.append(
                 f"• {module_prefix(t)}{type_label} — "

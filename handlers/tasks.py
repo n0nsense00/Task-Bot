@@ -6,6 +6,8 @@ pending semester deadlines.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -35,12 +37,12 @@ _DELETE_USAGE_MESSAGE: str = (
 )
 
 
-def _deadline_line(task: Task, status_emoji: str) -> list[str]:
+def _deadline_line(task: Task, status_emoji: str, today: date) -> list[str]:
     """Render one compact two-line deadline entry for Telegram."""
     type_emoji = TYPE_EMOJI.get(task.task_type, "📌")
     date_label = task.due_date.strftime("%a %d %b %Y")
     time_clause = f" at {esc(task.due_time)}" if task.due_time else ""
-    relative = days_away_label(task.due_date)
+    relative = days_away_label(task.due_date, today)
     return [
         f"{status_emoji} {module_prefix(task)}<b>{esc(task.title)}</b>",
         f"   {type_emoji} {esc(task.task_type.capitalize())} · "
@@ -71,7 +73,9 @@ def render_deadlines(chat_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
 
     lines: list[str] = ["📅 <b>Upcoming Deadlines</b>", "", DIVIDER, ""]
     for task in upcoming:
-        lines.extend(_deadline_line(task, urgency_emoji(task.due_date, today)))
+        lines.extend(
+            _deadline_line(task, urgency_emoji(task.due_date, today), today)
+        )
     lines.extend(["", DIVIDER, ""])
     lines.append(
         f"<i>{len(upcoming)} pending · sorted by due date</i>"
