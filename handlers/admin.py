@@ -1,8 +1,9 @@
 """Owner-only admin commands: ``/kill`` and ``/revive``.
 
 The kill switch silences the bot inside the allowed group without removing
-it from the chat or redeploying. State lives in ``data/killed.flag`` so it
-survives Railway restarts (the file is on the persistent volume).
+it from the chat or redeploying. State lives in ``data/killed.flag`` on the
+EC2 instance's EBS-backed disk, so it survives a service or host restart with
+no volume configuration at all.
 
 Both commands use ``@admin_only`` rather than ``@authorized_only`` because
 the latter respects the kill switch — using it on ``/revive`` would make

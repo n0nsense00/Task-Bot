@@ -6,14 +6,14 @@ APScheduler daily brief, and begins polling. Uses python-telegram-bot v22
 
 Shutdown signals: PTB's ``run_polling`` installs handlers for SIGINT, SIGTERM,
 and SIGABRT by default on POSIX (Windows gets SIGINT only, since the OS lacks
-the others). SIGTERM is what Railway sends on redeploy/restart, so graceful
-cleanup — including the ``post_shutdown`` hook that stops the scheduler —
-runs automatically without any explicit signal wiring.
+the others). SIGTERM is what systemd sends on ``systemctl stop`` and
+``systemctl restart``, so graceful cleanup — including the ``post_shutdown``
+hook that stops the scheduler — runs automatically without any explicit
+signal wiring.
 """
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 
 from telegram import BotCommand
@@ -91,14 +91,10 @@ def _get_build_identifier() -> str:
     """Return a short identifier for the running build, for startup logs.
 
     Order of precedence:
-      1. ``RAILWAY_GIT_COMMIT_SHA`` env var (set automatically on Railway builds),
-         truncated to 7 chars.
-      2. Local ``git rev-parse --short HEAD`` if a git repo is available.
-      3. The string ``'unknown'`` — should never hit in normal dev/deploy.
+      1. Local ``git rev-parse --short HEAD`` if a git repo is available. The
+         EC2 host deploys by ``git pull``, so the checkout is always present.
+      2. The string ``'unknown'`` — should never hit in normal dev/deploy.
     """
-    railway_sha = os.getenv("RAILWAY_GIT_COMMIT_SHA")
-    if railway_sha:
-        return railway_sha[:7]
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
