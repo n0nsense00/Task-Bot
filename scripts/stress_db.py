@@ -108,13 +108,6 @@ def run_stress(task_count: int, query_count: int, mutation_count: int) -> None:
                 _measure_ms(db.get_tasks_for_date, target, _STRESS_CHAT_ID)
             )
             query_timings.append(
-                _measure_ms(
-                    db.get_tasks_for_week,
-                    rng.randrange(1, 14),
-                    _STRESS_CHAT_ID,
-                )
-            )
-            query_timings.append(
                 _measure_ms(db.get_semester_deadlines, _STRESS_CHAT_ID)
             )
 
