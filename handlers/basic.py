@@ -64,8 +64,8 @@ def _help_message() -> str:
         DIVIDER,
         "",
         "<b>📅 View</b>",
-        "• /deadlines — pending assessed items grouped into Due Today, "
-        "Next 7 Days, and Later",
+        "• /deadlines — every pending assessed item in one list, "
+        "soonest first",
         "",
         "<b>✏️ Manage</b>",
         "• /add — guided flow: type → module → title → date → time → notes",
