@@ -210,3 +210,5 @@ __marimo__/
 data/
 seed/seed_data.csv
 seed/seed_modules.csv
+# Scratch PDF page images rendered during deadline extraction
+tmp/
