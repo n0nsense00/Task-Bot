@@ -63,7 +63,6 @@ TYPE_DISPLAY_ORDER: tuple[str, ...] = (
 
 STATUS_DUE_TODAY: str = "⚠️"
 STATUS_THIS_WEEK: str = "🔥"
-STATUS_DONE: str = "✅"
 STATUS_FUTURE: str = "📅"
 
 # Tips are rotated by date so the same tip shows all day.
@@ -167,16 +166,6 @@ def days_away_label(target: date) -> str:
     if delta > 0:
         return f"{delta} days away"
     return f"{-delta} days ago"
-
-
-# ---------------------------------------------------------------------------
-# Section helpers
-# ---------------------------------------------------------------------------
-
-def format_section_header(title: str, emoji: str | None = None) -> str:
-    """Bold section header line, optionally prefixed with ``emoji``."""
-    prefix = f"{emoji} " if emoji else ""
-    return f"<b>{prefix}{esc(title)}</b>"
 
 
 # ---------------------------------------------------------------------------
