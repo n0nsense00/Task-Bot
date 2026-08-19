@@ -14,7 +14,7 @@ the repo easy to run and review.
 - Add assessed deadlines through a guided Telegram flow.
 - Track quizzes, labs, assignments, projects, midterms, finals, and other items.
 - Store module codes, titles, due dates, optional due times, and notes.
-- View every pending deadline chronologically, grouped by urgency.
+- View every pending deadline in one chronological list, soonest first.
 - Complete, edit, or delete deadlines from Telegram inline buttons.
 - Automatically keep personal-chat and group-chat deadlines separate.
 - Serve a shared study group while restricting the bot to one configured chat.
@@ -80,7 +80,7 @@ the Telegram `/` suggestion menu.
 | --- | --- | --- |
 | `/start` | All | Show the welcome message |
 | `/help` | All | Show command reference |
-| `/deadlines` | All | Pending deadlines grouped into Due Today, Next 7 Days, and Later |
+| `/deadlines` | All | Every pending deadline in one list, soonest first |
 | `/add` | All | Add a deadline through an interactive flow |
 | `/done <id>` | All | Mark a deadline complete |
 | `/delete <id>` | All | Delete a deadline after confirmation |

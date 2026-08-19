@@ -18,9 +18,6 @@ from utils.errors import safe
 from utils.format import (
     DEADLINE_PICKER_PAGE_SIZE,
     DIVIDER,
-    STATUS_DUE_TODAY,
-    STATUS_FUTURE,
-    STATUS_THIS_WEEK,
     TYPE_EMOJI,
     build_deadline_dashboard_keyboard,
     build_deadline_picker_keyboard,
@@ -29,6 +26,7 @@ from utils.format import (
     esc,
     format_task_card,
     module_prefix,
+    urgency_emoji,
 )
 
 _DONE_USAGE_MESSAGE: str = "Usage: /done &lt;deadline_id&gt;  e.g. <code>/done 4</code>"
@@ -71,33 +69,9 @@ def render_deadlines(chat_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
             None,
         )
 
-    due_today: list[Task] = []
-    next_seven_days: list[Task] = []
-    later: list[Task] = []
-    for task in upcoming:
-        days = (task.due_date - today).days
-        if days == 0:
-            due_today.append(task)
-        elif days <= 7:
-            next_seven_days.append(task)
-        else:
-            later.append(task)
-
-    def add_section(
-        lines: list[str], header: str, items: list[Task], status: str
-    ) -> None:
-        if not items:
-            return
-        if len(lines) > 4:
-            lines.append("")
-        lines.append(f"<b>{header}</b>")
-        for task in items:
-            lines.extend(_deadline_line(task, status))
-
     lines: list[str] = ["📅 <b>Upcoming Deadlines</b>", "", DIVIDER, ""]
-    add_section(lines, "⚠️ Due Today", due_today, STATUS_DUE_TODAY)
-    add_section(lines, "🔥 Next 7 Days", next_seven_days, STATUS_THIS_WEEK)
-    add_section(lines, "🗓️ Later", later, STATUS_FUTURE)
+    for task in upcoming:
+        lines.extend(_deadline_line(task, urgency_emoji(task.due_date, today)))
     lines.extend(["", DIVIDER, ""])
     lines.append(
         f"<i>{len(upcoming)} pending · sorted by due date</i>"
@@ -137,7 +111,7 @@ def render_deadline_picker(
 @authorized_only
 @safe
 async def deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show every pending assessed deadline, grouped by urgency."""
+    """Show every pending assessed deadline in one chronological list."""
     message = update.effective_message
     chat = update.effective_chat
     if message is None or chat is None:

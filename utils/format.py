@@ -168,6 +168,22 @@ def days_away_label(target: date) -> str:
     return f"{-delta} days ago"
 
 
+def urgency_emoji(due: date, today: date) -> str:
+    """Urgency marker for a pending deadline, by how soon it falls due.
+
+    ``today`` is passed in rather than read from :func:`date.today` so callers
+    can anchor to the configured local timezone (see :func:`utils.clock.today_local`).
+    Reading UTC here would mislabel deadlines by a day for most of the evening
+    in Asia/Singapore.
+    """
+    delta = (due - today).days
+    if delta <= 0:
+        return STATUS_DUE_TODAY
+    if delta <= 7:
+        return STATUS_THIS_WEEK
+    return STATUS_FUTURE
+
+
 # ---------------------------------------------------------------------------
 # Task rendering
 # ---------------------------------------------------------------------------
