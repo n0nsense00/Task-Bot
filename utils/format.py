@@ -61,9 +61,6 @@ TYPE_DISPLAY_ORDER: tuple[str, ...] = (
     TASK_TYPE_OTHER,
 )
 
-# Backward-compat alias kept for older imports — same content as TYPE_PLURAL.
-TYPE_DISPLAY_LABEL: dict[str, str] = TYPE_PLURAL
-
 STATUS_DUE_TODAY: str = "⚠️"
 STATUS_THIS_WEEK: str = "🔥"
 STATUS_DONE: str = "✅"
@@ -97,13 +94,6 @@ CB_MODULE: str = "mod"
 # mod:skip           → skip module (e.g. personal tasks)
 # mod:clear          → clear the existing module (edit flow only)
 # mod:cancel         → abort the picker
-
-# Week-picker keyboard (used by /add WEEK and /edit EDIT_WEEK).
-CB_WEEK: str = "week"
-# week:set:<N>       → user picked week number 1-13
-# week:skip          → /add: no week (None)
-# week:clear         → /edit: clear existing week (set to None)
-# week:cancel        → abort the picker
 
 # Notes-prompt skip / clear button (used by /add NOTES and /edit EDIT_NOTES).
 CB_NOTES: str = "notes"
@@ -141,18 +131,6 @@ def module_label(module: Module) -> str:
     return module.code
 
 
-def format_due(due: date, due_time: str | None) -> str:
-    """Combine a date and optional time into a single human-readable string.
-
-    Examples: ``today``, ``today at 23:59``, ``in 3 days at 09:00``,
-    ``Wed 7 May``, ``Wed 7 May at 12:00``.
-    """
-    relative = format_relative_date(due)
-    if due_time:
-        return f"{relative} at {due_time}"
-    return relative
-
-
 # ---------------------------------------------------------------------------
 # Date formatting
 # ---------------------------------------------------------------------------
@@ -175,16 +153,6 @@ def format_relative_date(target: date) -> str:
     if -6 <= delta < 0:
         return f"{-delta} days ago"
     return target.strftime("%a %d %b")
-
-
-def format_absolute_date(target: date) -> str:
-    """Long-form date: ``Wednesday, 7 May 2026``.
-
-    Built up manually rather than via ``%-d`` / ``%#d`` because Linux and
-    Windows disagree on the no-leading-zero directive — and Task-Bot runs
-    on both (Windows for dev, Linux for the Railway worker).
-    """
-    return f"{target.strftime('%A')}, {target.day} {target.strftime('%b %Y')}"
 
 
 def days_away_label(target: date) -> str:
@@ -214,18 +182,6 @@ def format_section_header(title: str, emoji: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 # Task rendering
 # ---------------------------------------------------------------------------
-
-def task_status_emoji(task: Task) -> str:
-    """Pick the most-relevant single status emoji for a task."""
-    if task.completed:
-        return STATUS_DONE
-    delta = (task.due_date - date.today()).days
-    if delta == 0:
-        return STATUS_DUE_TODAY
-    if 0 < delta <= 7:
-        return STATUS_THIS_WEEK
-    return STATUS_FUTURE
-
 
 def format_task_line(task: Task) -> str:
     """One-line render of a task for grouped views.
@@ -289,43 +245,6 @@ def format_grouped_today(tasks: list[Task], target_date: date) -> list[str]:
         lines.append(f"<b>{TYPE_EMOJI[ttype]} {TYPE_PLURAL[ttype]}</b>")
         lines.extend(format_task_line(t) for t in bucket)
     return lines
-
-
-def format_task_list(
-    tasks: list[Task],
-    group_by_type: bool = True,
-    header: str | None = None,
-) -> str:
-    """Render a list of tasks as a single HTML block.
-
-    ``group_by_type=True`` (default) sections by type with emojis. False
-    produces a flat bulleted list — useful for "upcoming deadlines" sections
-    where order is by date, not type.
-    """
-    if not tasks:
-        return ""
-
-    out: list[str] = []
-    if header:
-        out.append(format_section_header(header))
-
-    if group_by_type:
-        grouped: dict[str, list[Task]] = {}
-        for t in tasks:
-            grouped.setdefault(t.task_type, []).append(t)
-        for ttype in TYPE_DISPLAY_ORDER:
-            bucket = grouped.get(ttype)
-            if not bucket:
-                continue
-            if out:
-                out.append("")
-            out.append(f"<b>{TYPE_EMOJI[ttype]} {TYPE_PLURAL[ttype]}</b>")
-            out.extend(format_task_line(t) for t in bucket)
-    else:
-        for t in tasks:
-            out.append(format_task_line(t))
-
-    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -483,72 +402,6 @@ def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
-
-
-def build_week_keyboard(
-    *,
-    include_skip: bool = False,
-    include_clear: bool = False,
-) -> InlineKeyboardMarkup:
-    """Build a week-number picker: 13 buttons (1-13) + Skip/Clear + Cancel.
-
-    Layout: 5 + 5 + 3 grid of numbered buttons. ``include_skip`` adds a
-    "Skip" row (used by /add to mean 'no week assigned'). ``include_clear``
-    adds a "Clear" button (used by /edit to mean 'remove the current week').
-    """
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for week_num in range(1, 14):
-        row.append(
-            InlineKeyboardButton(
-                str(week_num), callback_data=f"{CB_WEEK}:set:{week_num}"
-            )
-        )
-        if len(row) == 5:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-
-    bottom: list[InlineKeyboardButton] = []
-    if include_skip:
-        bottom.append(
-            InlineKeyboardButton("Skip", callback_data=f"{CB_WEEK}:skip")
-        )
-    if include_clear:
-        bottom.append(
-            InlineKeyboardButton("Clear", callback_data=f"{CB_WEEK}:clear")
-        )
-    if bottom:
-        rows.append(bottom)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "❌ Cancel", callback_data=f"{CB_WEEK}:cancel"
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
-
-
-def parse_week_callback(data: str) -> tuple[str, int | None]:
-    """Decode a week-picker callback into ``(action, payload)``.
-
-    Actions: ``set`` (payload = int 1-13), ``skip``, ``clear``, ``cancel``,
-    ``unknown``.
-    """
-    if data == f"{CB_WEEK}:skip":
-        return ("skip", None)
-    if data == f"{CB_WEEK}:clear":
-        return ("clear", None)
-    if data == f"{CB_WEEK}:cancel":
-        return ("cancel", None)
-    if data.startswith(f"{CB_WEEK}:set:"):
-        try:
-            return ("set", int(data[len(f"{CB_WEEK}:set:") :]))
-        except ValueError:
-            return ("unknown", None)
-    return ("unknown", None)
 
 
 def build_notes_keyboard(

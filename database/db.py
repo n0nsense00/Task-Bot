@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     INTEGER NOT NULL,
     title       TEXT    NOT NULL,
+    -- 'lecture','tutorial','personal' are legacy types accepted only so older
+    -- databases keep every row. They are deliberately absent from the /add and
+    -- /edit pickers: the bot now tracks assessed deadlines, not class
+    -- timetables. Narrowing this CHECK would need a full table rebuild for no
+    -- functional gain, so the constraint stays as-is.
     task_type   TEXT    NOT NULL CHECK(task_type IN
                     ('quiz','lab','assignment','project','midterm','final','other',
                      'lecture','tutorial','personal')),
@@ -336,26 +341,6 @@ def get_tasks_for_date(target_date: date, chat_id: int) -> list[Task]:
                ORDER BY task_type, due_time IS NULL, due_time, title""",
             (target_date.isoformat(), chat_id),
         ).fetchall()
-    return [_row_to_task(r) for r in rows]
-
-
-def get_tasks_for_week(
-    week_num: int, chat_id: int, task_types: Optional[list[str]] = None
-) -> list[Task]:
-    """Return tasks in ``week_num``, optionally filtered by ``task_types``.
-
-    When ``task_types`` is ``None`` or empty, no type filter is applied.
-    Results are sorted by ``due_date``, then type, then title.
-    """
-    query = "SELECT * FROM tasks WHERE week_number = ? AND chat_id = ?"
-    params: list = [week_num, chat_id]
-    if task_types:
-        placeholders = ",".join("?" * len(task_types))
-        query += f" AND task_type IN ({placeholders})"
-        params.extend(task_types)
-    query += " ORDER BY due_date, due_time IS NULL, due_time, task_type, title"
-    with _get_conn() as conn:
-        rows = conn.execute(query, params).fetchall()
     return [_row_to_task(r) for r in rows]
 
 

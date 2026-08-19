@@ -27,12 +27,6 @@ TASK_TYPES: tuple[str, ...] = (
     TASK_TYPE_OTHER,
 )
 
-# Accepted only so older databases can be migrated without losing rows. These
-# are deliberately absent from the /add and /edit pickers: the bot now focuses
-# on assessed deadlines instead of class timetables.
-LEGACY_TASK_TYPES: tuple[str, ...] = ("lecture", "tutorial", "personal")
-ALL_TASK_TYPES: tuple[str, ...] = TASK_TYPES + LEGACY_TASK_TYPES
-
 
 @dataclass
 class Task:

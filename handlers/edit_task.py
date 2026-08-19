@@ -50,7 +50,6 @@ from utils.calendar_widget import (
 from utils.errors import safe
 from utils.format import (
     CB_EDIT,
-    CB_EDIT_CANCEL,
     CB_EDIT_FIELD,
     CB_EDIT_TYPE_VALUE,
     CB_MODULE,
