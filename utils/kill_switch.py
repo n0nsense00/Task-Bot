@@ -7,8 +7,9 @@ handlers (``@admin_only``) deliberately bypass the kill switch so the owner
 can still issue ``/revive`` (and ``/clear``) from a killed state — otherwise
 engaging the switch would lock the owner out with no way back in.
 
-Flag lives at ``data/killed.flag`` — on Railway this path is on the persistent
-volume, so the kill state survives container restarts and redeploys.
+Flag lives at ``data/killed.flag`` — on the EC2 host this path sits on the
+instance's EBS-backed disk, so the kill state survives service restarts and
+redeploys without any volume configuration.
 """
 from __future__ import annotations
 

@@ -1,10 +1,11 @@
 """Timezone-aware ``today`` helper.
 
-Railway containers run in UTC. Calling :func:`datetime.date.today` returns
-the UTC day, which can lag the user's local calendar by up to several hours
-(8 hours for ``Asia/Singapore``). For features whose correctness depends on
-"is this date in the past?" — the auto-cleanup of expired midterms/finals
-in particular — we anchor against :data:`config.TIMEZONE` instead.
+The EC2 host runs in UTC (the instance default). Calling
+:func:`datetime.date.today` returns the UTC day, which can lag the user's
+local calendar by up to several hours (8 hours for ``Asia/Singapore``). For
+features whose correctness depends on "is this date in the past?" — the
+auto-cleanup of expired midterms/finals in particular — we anchor against
+:data:`config.TIMEZONE` instead.
 """
 from __future__ import annotations
 

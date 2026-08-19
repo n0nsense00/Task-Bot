@@ -205,10 +205,11 @@ async def catch_up_missed_brief(application: Application) -> None:
 async def _log_heartbeat() -> None:
     """Emit a periodic 'alive' log line for deployed-bot liveness checks.
 
-    With the bot running as a Railway worker there is no public HTTP endpoint
-    to poll, so the log stream is the health signal. A steady ``heartbeat:
-    alive`` every ``_HEARTBEAT_INTERVAL_MINUTES`` means the asyncio loop is
-    running and the scheduler is servicing jobs.
+    With the bot running as a systemd service on EC2 there is no public HTTP
+    endpoint to poll, so the journal is the health signal — read it with
+    ``journalctl -u task-bot -f``. A steady ``heartbeat: alive`` every
+    ``_HEARTBEAT_INTERVAL_MINUTES`` means the asyncio loop is running and the
+    scheduler is servicing jobs.
     """
     logger.info("heartbeat: alive")
 
@@ -218,8 +219,9 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
 
     The caller is responsible for ``start()`` and ``shutdown()``.
     ``misfire_grace_time`` on the brief is set to an hour so that if the bot
-    was paused at the scheduled moment (e.g. laptop sleep, Railway restart)
-    but wakes within an hour, the morning brief still fires.
+    was paused at the scheduled moment (e.g. laptop sleep, a ``systemctl
+    restart`` on the EC2 host) but wakes within an hour, the morning brief
+    still fires.
     """
     tz = _resolve_timezone()
     scheduler = AsyncIOScheduler(timezone=tz)

@@ -244,6 +244,10 @@ sitting in a stdio buffer.
 redeploys with no extra configuration — unlike an ephemeral container
 filesystem, which needs a mounted volume to avoid losing the database.
 
+`runtime.txt` records the Python version the bot is built and tested against
+(3.13.6). Nothing on the EC2 host reads it; it is there so the pin is written
+down next to the code.
+
 ### Liveness
 
 The bot is a polling worker with no HTTP endpoint, so there is nothing to health
@@ -252,13 +256,6 @@ check from outside. Liveness is confirmed three ways:
 1. A `heartbeat: alive` line in the journal every 10 minutes.
 2. `sudo systemctl status task-bot` showing `active (running)`.
 3. Sending `/brief` in Telegram — a healthy bot replies in about a second.
-
-### Legacy: Railway
-
-The repo still carries `Procfile` and `runtime.txt` from an earlier Railway
-deployment, and [DEPLOY.md](DEPLOY.md) documents that setup. Both are kept for
-reference and for anyone who prefers a PaaS, but **EC2 is the live
-deployment** — DEPLOY.md is not the current runbook.
 
 ## Engineering Notes
 
@@ -277,7 +274,6 @@ deployment** — DEPLOY.md is not the current runbook.
 
 ## Next Improvements
 
-- Rewrite `DEPLOY.md` around the EC2/systemd runbook and retire the Railway guide.
 - Add GitHub Actions for `scripts/check_db.py` and import validation.
 - Add focused unit tests around formatter and callback parser helpers.
 - Add a small architecture diagram image for the README.
