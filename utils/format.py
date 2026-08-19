@@ -210,7 +210,7 @@ def format_task_card(task: Task) -> str:
 
     Used for confirmations (delete, edit) and the post-/add summary.
     Includes type emoji, module, title, type label, relative + absolute
-    date, time (if set), week (if set), notes (if set), and ID.
+    date, time (if set), notes (if set), and ID.
     """
     type_emoji = TYPE_EMOJI.get(task.task_type, "•")
     relative = format_relative_date(task.due_date)
@@ -223,8 +223,6 @@ def format_task_card(task: Task) -> str:
         f"<i>{esc(task.task_type.capitalize())} · "
         f"{relative} ({absolute}){time_clause}</i>",
     ]
-    if task.week_number is not None:
-        lines.append(f"<i>Week {task.week_number}</i>")
     if task.notes:
         lines.append("")
         lines.append(esc(task.notes))

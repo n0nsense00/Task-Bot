@@ -411,7 +411,6 @@ async def _finalize_add(
             due_date=draft["due_date"],
             chat_id=chat.id,
             module_code=draft.get("module_code"),
-            week_number=draft.get("week_number"),
             notes=draft.get("notes"),
             due_time=draft.get("due_time"),
         )

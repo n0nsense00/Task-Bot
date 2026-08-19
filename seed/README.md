@@ -43,14 +43,18 @@ python seed/seed_tasks.py --file path/to/other.csv
 The current task CSV header is:
 
 ```csv
-title,task_type,module_code,due_date,due_time,week_number,notes
+title,task_type,module_code,due_date,due_time,notes
 ```
 
 The older no-time header is still accepted for compatibility:
 
 ```csv
-title,task_type,module_code,due_date,week_number,notes
+title,task_type,module_code,due_date,notes
 ```
+
+Both headers are also accepted with a `week_number` column in the
+second-to-last position. That column was dropped from the data model; it is
+still parsed so existing CSVs keep importing, but its value is discarded.
 
 Rules:
 
@@ -61,7 +65,6 @@ Rules:
 | `module_code` | yes | a module code from your semester |
 | `due_date` | yes | `YYYY-MM-DD` |
 | `due_time` | no | blank, or `HH:MM` 24-hour time |
-| `week_number` | no | blank, or integer 1-13 |
 | `notes` | no | any string, or blank |
 
 Lines starting with `#` are comments and skipped. Blank lines are skipped.

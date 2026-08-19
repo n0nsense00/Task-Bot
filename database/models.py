@@ -48,7 +48,6 @@ class Task:
     due_date: date
     chat_id: Optional[int] = None
     module_code: Optional[str] = None
-    week_number: Optional[int] = None
     notes: Optional[str] = None
     completed: bool = False
     id: Optional[int] = None

@@ -8,8 +8,11 @@ Usage (from the project root with the venv active):
 
 The CSV must have one of these header rows:
 
-    title,task_type,module_code,due_date,week_number,notes
-    title,task_type,module_code,due_date,due_time,week_number,notes
+    title,task_type,module_code,due_date,notes
+    title,task_type,module_code,due_date,due_time,notes
+
+A legacy ``week_number`` column is still accepted in either header and
+ignored, so CSVs written before it was dropped keep working.
 
 Lines whose first non-whitespace character is ``#`` are comments and skipped;
 so are blank lines. The header row must be the first non-comment line.
@@ -49,7 +52,6 @@ BASE_COLUMNS: tuple[str, ...] = (
     "task_type",
     "module_code",
     "due_date",
-    "week_number",
     "notes",
 )
 TIME_COLUMNS: tuple[str, ...] = (
@@ -58,10 +60,33 @@ TIME_COLUMNS: tuple[str, ...] = (
     "module_code",
     "due_date",
     "due_time",
+    "notes",
+)
+# Headers from before week_number was dropped. Still accepted so an existing
+# seed CSV keeps importing; the column's value is read and discarded.
+LEGACY_BASE_COLUMNS: tuple[str, ...] = (
+    "title",
+    "task_type",
+    "module_code",
+    "due_date",
     "week_number",
     "notes",
 )
-ACCEPTED_COLUMNS: tuple[tuple[str, ...], ...] = (BASE_COLUMNS, TIME_COLUMNS)
+LEGACY_TIME_COLUMNS: tuple[str, ...] = (
+    "title",
+    "task_type",
+    "module_code",
+    "due_date",
+    "due_time",
+    "week_number",
+    "notes",
+)
+ACCEPTED_COLUMNS: tuple[tuple[str, ...], ...] = (
+    BASE_COLUMNS,
+    TIME_COLUMNS,
+    LEGACY_BASE_COLUMNS,
+    LEGACY_TIME_COLUMNS,
+)
 DEFAULT_CSV_PATH: Path = _PROJECT_ROOT / "seed" / "seed_data.csv"
 
 _PLURAL_LABEL: dict[str, str] = {
@@ -136,7 +161,6 @@ def _validate_row(raw: _RawRow) -> Task:
       - module_code: required
       - due_date: parseable as ``YYYY-MM-DD``
       - due_time: blank, or ``HH:MM`` 24-hour time
-      - week_number: blank, or integer 1..13
       - notes: any string, or blank
     """
     data = raw.data
@@ -186,22 +210,6 @@ def _validate_row(raw: _RawRow) -> Task:
                 f"due_time {due_time!r} is not valid HH:MM"
             )
 
-    week_raw = (data.get("week_number") or "").strip()
-    week_number: int | None
-    if week_raw:
-        try:
-            week_number = int(week_raw)
-        except ValueError:
-            raise ValueError(
-                f"week_number {week_raw!r} is not an integer"
-            ) from None
-        if not 1 <= week_number <= 13:
-            raise ValueError(
-                f"week_number {week_number} must be between 1 and 13"
-            )
-    else:
-        week_number = None
-
     notes = (data.get("notes") or "").strip() or None
 
     return Task(
@@ -210,7 +218,6 @@ def _validate_row(raw: _RawRow) -> Task:
         module_code=module_code,
         due_date=due,
         due_time=due_time,
-        week_number=week_number,
         notes=notes,
     )
 

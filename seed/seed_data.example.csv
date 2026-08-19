@@ -1,16 +1,15 @@
 # Task-Bot seed data - reference template.
 # Lines starting with '#' are ignored. Blank lines are ignored.
-# Columns (exact order): title, task_type, module_code, due_date, due_time, week_number, notes
+# Columns (exact order): title, task_type, module_code, due_date, due_time, notes
 # task_type must be one of: quiz, lab, assignment, project, midterm, final, other
 # module_code is required.
 # due_time is blank or HH:MM in 24-hour time.
-# week_number is blank or an integer 1-13.
 # due_date must be YYYY-MM-DD.
-title,task_type,module_code,due_date,due_time,week_number,notes
-SC2001 Lab Quiz 1,quiz,SC2001,2026-09-03,09:00,,Covers weeks 1-3
-SC2005 Lab 1,lab,SC2005,2026-09-10,23:59,,Submit source code and report
-SC2002 Assignment 1,assignment,SC2002,2026-09-18,23:59,,Upload to course portal
-MH2500 Group Project,project,MH2500,2026-10-09,17:00,,Final report submission
-MH2100 Midterm,midterm,MH2100,2026-10-15,18:30,,Venue TBA
-SC2001 Final,final,SC2001,2026-11-23,13:00,,Exam runs from 13:00 to 15:00
-CL0103 Reflection,other,CL0103,2026-11-06,23:59,,Individual reflection
+title,task_type,module_code,due_date,due_time,notes
+SC2001 Lab Quiz 1,quiz,SC2001,2026-09-03,09:00,Covers weeks 1-3
+SC2005 Lab 1,lab,SC2005,2026-09-10,23:59,Submit source code and report
+SC2002 Assignment 1,assignment,SC2002,2026-09-18,23:59,Upload to course portal
+MH2500 Group Project,project,MH2500,2026-10-09,17:00,Final report submission
+MH2100 Midterm,midterm,MH2100,2026-10-15,18:30,Venue TBA
+SC2001 Final,final,SC2001,2026-11-23,13:00,Exam runs from 13:00 to 15:00
+CL0103 Reflection,other,CL0103,2026-11-06,23:59,Individual reflection
