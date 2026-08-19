@@ -30,13 +30,8 @@ from config import (
     MY_TELEGRAM_ID,
     TIMEZONE,
 )
-from database.db import (
-    cleanup_past_deadlines,
-    get_semester_deadlines,
-    get_tasks_for_date,
-)
+from database.db import get_semester_deadlines
 from database.models import Task
-from utils.clock import today_local
 from utils.format import (
     DIVIDER,
     days_away_label,
@@ -53,9 +48,6 @@ _LAST_BRIEF_FILE: Path = _PROJECT_ROOT / "data" / "last_brief.txt"
 _JOB_ID: str = "morning_brief"
 _HEARTBEAT_JOB_ID: str = "heartbeat"
 _HEARTBEAT_INTERVAL_MINUTES: int = 10
-_CLEANUP_JOB_ID: str = "cleanup_past_deadlines"
-_CLEANUP_HOUR: int = 0
-_CLEANUP_MINUTE: int = 5
 _UPCOMING_WINDOW_DAYS: int = 14
 _UPCOMING_LIMIT: int = 3
 
@@ -75,7 +67,7 @@ def _resolve_timezone() -> ZoneInfo:
         return ZoneInfo("Asia/Singapore")
 
 
-def _upcoming_deadlines() -> list[Task]:
+def _upcoming_deadlines(chat_id: int) -> list[Task]:
     """Return up to ``_UPCOMING_LIMIT`` upcoming deadlines within the window.
 
     "Upcoming" means ``today <= due_date <= today + _UPCOMING_WINDOW_DAYS``.
@@ -86,23 +78,25 @@ def _upcoming_deadlines() -> list[Task]:
     window_end_ord = today.toordinal() + _UPCOMING_WINDOW_DAYS
     candidates = [
         t
-        for t in get_semester_deadlines()
+        for t in get_semester_deadlines(chat_id)
         if today.toordinal() <= t.due_date.toordinal() <= window_end_ord
     ]
     return candidates[:_UPCOMING_LIMIT]
 
 
-def build_morning_brief() -> str:
+def build_morning_brief(chat_id: int) -> str:
     """Assemble the morning brief as an HTML-formatted string.
 
-    Layout matches /today: greeting, divider, grouped task sections, divider,
-    upcoming-deadlines preview. Short-circuits to a terse "clear day" message
+    Layout shows today's assessed items followed by a near-term preview.
+    Short-circuits to a terse "clear day" message
     when there is nothing due today AND no upcoming deadlines in the next
     fortnight, so the morning push doesn't pester the user with empty lists.
     """
     today = date.today()
-    tasks = get_tasks_for_date(today)
-    upcoming = _upcoming_deadlines()
+    tasks = [
+        t for t in get_semester_deadlines(chat_id) if t.due_date == today
+    ]
+    upcoming = _upcoming_deadlines(chat_id)
 
     if not tasks and not upcoming:
         return _CLEAR_DAY_MESSAGE
@@ -159,7 +153,7 @@ async def send_morning_brief(application: Application) -> None:
     can't crash the scheduler.
     """
     try:
-        text = build_morning_brief()
+        text = build_morning_brief(MY_TELEGRAM_ID)
         await application.bot.send_message(
             chat_id=MY_TELEGRAM_ID,
             text=text,
@@ -219,24 +213,6 @@ async def _log_heartbeat() -> None:
     logger.info("heartbeat: alive")
 
 
-async def cleanup_deadlines_job() -> None:
-    """Daily 00:05 cron: purge midterms/finals whose date has passed.
-
-    Runs in the configured local timezone (so "midnight" is the user's
-    midnight, not UTC's). Lazy cleanup on /semester covers the case where
-    this job missed its window — between the two, /semester output stays
-    consistent with the user's calendar.
-    """
-    today = today_local()
-    deleted = cleanup_past_deadlines(today)
-    if deleted:
-        logger.info(
-            "Cleanup: deleted %d past midterm(s)/final(s) before %s",
-            deleted,
-            today.isoformat(),
-        )
-
-
 def build_scheduler(application: Application) -> AsyncIOScheduler:
     """Construct the AsyncIOScheduler with the daily brief and heartbeat jobs.
 
@@ -268,14 +244,5 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
         trigger=IntervalTrigger(minutes=_HEARTBEAT_INTERVAL_MINUTES),
         id=_HEARTBEAT_JOB_ID,
         replace_existing=True,
-    )
-    scheduler.add_job(
-        cleanup_deadlines_job,
-        trigger=CronTrigger(
-            hour=_CLEANUP_HOUR, minute=_CLEANUP_MINUTE, timezone=tz
-        ),
-        id=_CLEANUP_JOB_ID,
-        replace_existing=True,
-        misfire_grace_time=3600,
     )
     return scheduler

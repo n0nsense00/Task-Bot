@@ -21,8 +21,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from database import db  # noqa: E402
 from database.models import (  # noqa: E402
     TASK_TYPE_ASSIGNMENT,
-    TASK_TYPE_LECTURE,
     TASK_TYPE_MIDTERM,
+    TASK_TYPE_QUIZ,
     Module,
     Task,
 )
@@ -35,6 +35,8 @@ def _print_result(label: str, value: object) -> None:
 
 def run_check() -> None:
     """Exercise the database layer against a throwaway DB file."""
+    personal_chat_id = 111_111
+    group_chat_id = -100_222_222
     with TemporaryDirectory(prefix="taskbot-check-") as tmp_dir:
         db.DB_PATH = Path(tmp_dir) / "tasks.db"
         db.init_db()
@@ -55,6 +57,7 @@ def run_check() -> None:
             due_time="09:00",
             module_code="CS2040",
             week_number=1,
+            chat_id=personal_chat_id,
         )
         late_assignment = Task(
             title="Assignment late slot",
@@ -64,13 +67,15 @@ def run_check() -> None:
             module_code="CS2040",
             week_number=1,
             notes="Submit before midnight.",
+            chat_id=personal_chat_id,
         )
-        lecture = Task(
-            title="Lecture tomorrow",
-            task_type=TASK_TYPE_LECTURE,
+        quiz = Task(
+            title="Quiz tomorrow",
+            task_type=TASK_TYPE_QUIZ,
             due_date=tomorrow,
             module_code="MH2100",
             week_number=1,
+            chat_id=personal_chat_id,
         )
         old_midterm = Task(
             title="Past midterm",
@@ -79,35 +84,61 @@ def run_check() -> None:
             due_time="18:30",
             module_code="CS2040",
             week_number=1,
+            chat_id=personal_chat_id,
+        )
+        group_quiz = Task(
+            title="Group-only quiz",
+            task_type=TASK_TYPE_QUIZ,
+            due_date=tomorrow,
+            module_code="CS2040",
+            chat_id=group_chat_id,
         )
 
         early_id, late_id = db.add_tasks([early_assignment, late_assignment])
-        lecture_id = db.add_task(lecture)
+        quiz_id = db.add_task(quiz)
         old_midterm_id = db.add_task(old_midterm)
-        assert db.count_tasks() == 4
+        group_quiz_id = db.add_task(group_quiz)
+        assert db.count_tasks() == 5
+        assert db.count_tasks(personal_chat_id) == 4
+        assert db.count_tasks(group_chat_id) == 1
 
-        due_today = db.get_tasks_for_date(today)
+        due_today = db.get_tasks_for_date(today, personal_chat_id)
         assert [t.id for t in due_today] == [early_id, late_id]
+        assert db.get_tasks_for_date(today, group_chat_id) == []
 
-        fetched = db.get_task(late_id)
+        fetched = db.get_task(late_id, personal_chat_id)
         assert fetched is not None
         assert fetched.due_time == "23:59"
+        assert db.get_task(late_id, group_chat_id) is None
         fetched.notes = "Updated notes"
         assert db.update_task(fetched)
-        assert db.get_task(late_id).notes == "Updated notes"  # type: ignore[union-attr]
+        assert db.get_task(late_id, personal_chat_id).notes == "Updated notes"  # type: ignore[union-attr]
 
-        assert db.mark_complete(early_id)
-        pending_ids = {t.id for t in db.get_all_pending()}
+        assert not db.mark_complete(early_id, group_chat_id)
+        assert db.mark_complete(early_id, personal_chat_id)
+        pending_ids = {t.id for t in db.get_all_pending(personal_chat_id)}
         assert early_id not in pending_ids
         assert late_id in pending_ids
 
-        removed_deadlines = db.cleanup_past_deadlines(today)
-        assert removed_deadlines == 1
-        assert db.get_task(old_midterm_id) is None
+        deadline_ids = {
+            t.id for t in db.get_semester_deadlines(personal_chat_id)
+        }
+        assert late_id in deadline_ids
+        assert quiz_id in deadline_ids
+        assert early_id not in deadline_ids
+        assert {
+            t.id for t in db.get_semester_deadlines(group_chat_id)
+        } == {group_quiz_id}
 
-        assert db.delete_task(lecture_id)
-        assert db.delete_task(late_id)
-        assert db.delete_task(early_id)
+        removed_deadlines = db.cleanup_past_deadlines(today, personal_chat_id)
+        assert removed_deadlines == 1
+        assert db.get_task(old_midterm_id, personal_chat_id) is None
+
+        assert not db.delete_task(group_quiz_id, personal_chat_id)
+        assert db.delete_task(group_quiz_id, group_chat_id)
+        assert db.delete_task(quiz_id, personal_chat_id)
+        assert db.delete_task(late_id, personal_chat_id)
+        assert db.delete_task(early_id, personal_chat_id)
         assert db.count_tasks() == 0
 
         _print_result("temporary_db", db.DB_PATH)

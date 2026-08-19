@@ -1,7 +1,7 @@
 """Shared HTML formatting helpers + inline-keyboard builders for task display.
 
-Centralised so on-demand command handlers (/today, /week, /semester, /brief),
-the scheduled morning brief, and callback handlers all render identically.
+Centralised so /deadlines, /brief, the scheduled morning brief, and callback
+handlers render consistently.
 Every user-supplied string flows through :func:`esc` before interpolation —
 the single chokepoint that prevents injection of HTML tags into the rendered
 Telegram message.
@@ -16,10 +16,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database.models import (
     TASK_TYPE_ASSIGNMENT,
     TASK_TYPE_FINAL,
-    TASK_TYPE_LECTURE,
+    TASK_TYPE_LAB,
     TASK_TYPE_MIDTERM,
-    TASK_TYPE_PERSONAL,
-    TASK_TYPE_TUTORIAL,
+    TASK_TYPE_OTHER,
+    TASK_TYPE_PROJECT,
+    TASK_TYPE_QUIZ,
     Module,
     Task,
 )
@@ -31,30 +32,33 @@ from database.models import (
 DIVIDER: str = "━━━━━━━━━━━━━━━━━━━"
 
 TYPE_EMOJI: dict[str, str] = {
-    TASK_TYPE_LECTURE: "📚",
-    TASK_TYPE_TUTORIAL: "📝",
+    TASK_TYPE_QUIZ: "❓",
+    TASK_TYPE_LAB: "🧪",
     TASK_TYPE_ASSIGNMENT: "📦",
+    TASK_TYPE_PROJECT: "🛠️",
     TASK_TYPE_MIDTERM: "🎯",
     TASK_TYPE_FINAL: "📕",
-    TASK_TYPE_PERSONAL: "✏️",
+    TASK_TYPE_OTHER: "📌",
 }
 
 TYPE_PLURAL: dict[str, str] = {
-    TASK_TYPE_LECTURE: "Lectures",
-    TASK_TYPE_TUTORIAL: "Tutorials",
+    TASK_TYPE_QUIZ: "Quizzes",
+    TASK_TYPE_LAB: "Labs",
     TASK_TYPE_ASSIGNMENT: "Assignments",
+    TASK_TYPE_PROJECT: "Projects",
     TASK_TYPE_MIDTERM: "Midterms",
     TASK_TYPE_FINAL: "Finals",
-    TASK_TYPE_PERSONAL: "Personal",
+    TASK_TYPE_OTHER: "Other",
 }
 
 TYPE_DISPLAY_ORDER: tuple[str, ...] = (
-    TASK_TYPE_LECTURE,
-    TASK_TYPE_TUTORIAL,
+    TASK_TYPE_QUIZ,
+    TASK_TYPE_LAB,
     TASK_TYPE_ASSIGNMENT,
+    TASK_TYPE_PROJECT,
     TASK_TYPE_MIDTERM,
     TASK_TYPE_FINAL,
-    TASK_TYPE_PERSONAL,
+    TASK_TYPE_OTHER,
 )
 
 # Backward-compat alias kept for older imports — same content as TYPE_PLURAL.
@@ -67,22 +71,24 @@ STATUS_FUTURE: str = "📅"
 
 # Tips are rotated by date so the same tip shows all day.
 TIPS: tuple[str, ...] = (
-    "💡 Tip: tap ✅ on any task in /today to mark it complete instantly",
-    "💡 Tip: tap 📝 on a task to edit any field",
-    "💡 Tip: tap 🗑️ to delete a task (with a confirmation prompt)",
-    "💡 Tip: send /add to create a new task step by step",
-    "💡 Tip: /week shows lectures this week + tutorials next week",
-    "💡 Tip: /semester lists every midterm and final by due date",
-    "💡 Tip: /brief sends today's morning summary on demand",
+    "💡 Tip: /deadlines shows every assessed item in due-date order",
+    "💡 Tip: tap ⚙️ Manage deadlines to complete, edit, or delete an item",
+    "💡 Tip: the deadline manager shows six items per page for easier scanning",
+    "💡 Tip: use a clear title such as “Lab Quiz 2” or “Project Demo”",
+    "💡 Tip: add venue or submission details in Notes",
+    "💡 Tip: /brief previews what is due soon",
 )
 
-# Callback-data prefixes used by the inline keyboards on /today.
+# Callback-data prefixes used by the inline keyboards on /deadlines.
 CB_DONE: str = "done"
 CB_DELETE: str = "del"   # del:N (entry) | del:yes:N | del:no:N
 CB_EDIT: str = "edit"    # edit:N (entry) | editf:<field>:N (field pick)
 CB_EDIT_FIELD: str = "editf"
 CB_EDIT_TYPE_VALUE: str = "edittype"  # edittype:<value>:N
 CB_EDIT_CANCEL: str = "editcancel"
+CB_MANAGE: str = "manage"  # manage:<page>
+CB_MANAGE_ITEM: str = "manageitem"  # manageitem:<task_id>:<page>
+CB_MANAGE_DASHBOARD: str = "managedash"
 
 # Module-picker keyboard (used by both /add and /edit module-field flows).
 CB_MODULE: str = "mod"
@@ -182,7 +188,7 @@ def format_absolute_date(target: date) -> str:
 
 
 def days_away_label(target: date) -> str:
-    """Legacy alias used by /semester — phrasing 'N days away' / 'N days ago'."""
+    """Return concise phrasing such as 'N days away' or 'N days ago'."""
     delta = (target - date.today()).days
     if delta == 0:
         return "today"
@@ -326,39 +332,95 @@ def format_task_list(
 # Inline keyboards
 # ---------------------------------------------------------------------------
 
-# Soft cap on how many tasks get inline-action buttons in /today. Telegram
-# allows up to 100 buttons per message; beyond ~5 tasks (15 buttons) the
-# keyboard becomes visually cluttered on phone screens.
-TASK_KEYBOARD_MAX_TASKS: int = 5
+# Six rows keep the picker usable on smaller phone screens. The main
+# /deadlines dashboard itself only has one button, so it stays compact.
+DEADLINE_PICKER_PAGE_SIZE: int = 6
 
 
-def build_task_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup | None:
-    """Three-buttons-per-task keyboard: ✅ Done, 📝 Edit, 🗑️ Delete.
+def build_deadline_dashboard_keyboard() -> InlineKeyboardMarkup:
+    """Return the single compact action shown under /deadlines."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⚙️ Manage deadlines", callback_data=f"{CB_MANAGE}:0"
+                )
+            ]
+        ]
+    )
 
-    Returns ``None`` for an empty list so callers can pass
-    ``reply_markup=None`` and Telegram drops the keyboard entirely.
-    Truncates silently to ``TASK_KEYBOARD_MAX_TASKS`` to keep the keyboard
-    height sane on mobile.
-    """
-    if not tasks:
-        return None
-    capped = tasks[:TASK_KEYBOARD_MAX_TASKS]
+
+def _deadline_picker_label(task: Task) -> str:
+    """Build a short, identifiable button label for the manager list."""
+    date_label = task.due_date.strftime("%d %b")
+    module = f"{task.module_code} · " if task.module_code else ""
+    label = f"{date_label} · {module}{task.title}"
+    return label if len(label) <= 52 else label[:51] + "…"
+
+
+def build_deadline_picker_keyboard(
+    tasks: list[Task], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    """Build one deadline button per row plus compact pagination controls."""
     rows: list[list[InlineKeyboardButton]] = []
-    for t in capped:
+    for task in tasks:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"✅ #{t.id}", callback_data=f"{CB_DONE}:{t.id}"
-                ),
-                InlineKeyboardButton(
-                    f"📝 #{t.id}", callback_data=f"{CB_EDIT}:{t.id}"
-                ),
-                InlineKeyboardButton(
-                    f"🗑️ #{t.id}", callback_data=f"{CB_DELETE}:{t.id}"
-                ),
+                    _deadline_picker_label(task),
+                    callback_data=f"{CB_MANAGE_ITEM}:{task.id}:{page}",
+                )
             ]
         )
+
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "← Previous", callback_data=f"{CB_MANAGE}:{page - 1}"
+            )
+        )
+    if page + 1 < total_pages:
+        navigation.append(
+            InlineKeyboardButton(
+                "Next →", callback_data=f"{CB_MANAGE}:{page + 1}"
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "← Back to deadlines", callback_data=CB_MANAGE_DASHBOARD
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
+
+
+def build_deadline_action_keyboard(task_id: int, page: int) -> InlineKeyboardMarkup:
+    """Show actions immediately below one selected deadline."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Complete", callback_data=f"{CB_DONE}:{task_id}"
+                ),
+                InlineKeyboardButton(
+                    "📝 Edit", callback_data=f"{CB_EDIT}:{task_id}"
+                ),
+                InlineKeyboardButton(
+                    "🗑️ Delete", callback_data=f"{CB_DELETE}:{task_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "← Back to list", callback_data=f"{CB_MANAGE}:{page}"
+                )
+            ],
+        ]
+    )
 
 
 def build_delete_confirmation_keyboard(task_id: int) -> InlineKeyboardMarkup:
@@ -380,9 +442,8 @@ def build_delete_confirmation_keyboard(task_id: int) -> InlineKeyboardMarkup:
 def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
     """Field picker shown after the user taps 📝 Edit on a task.
 
-    Layout: 2 buttons per row, 4 rows + final Cancel row. Time was added
-    when /add gained an optional time field; keeping all 7 fields editable
-    so /edit doesn't have a partial-coverage gap.
+    Layout: two buttons per row. Academic week was removed from the active
+    workflow because the deadline's calendar date is the source of truth.
     """
     return InlineKeyboardMarkup(
         [
@@ -410,15 +471,11 @@ def build_edit_field_keyboard(task_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"{CB_EDIT_FIELD}:time:{task_id}",
                 ),
                 InlineKeyboardButton(
-                    "📊 Week",
-                    callback_data=f"{CB_EDIT_FIELD}:week:{task_id}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
                     "📋 Notes",
                     callback_data=f"{CB_EDIT_FIELD}:notes:{task_id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     "❌ Cancel",
                     callback_data=f"{CB_EDIT_CANCEL}:{task_id}",

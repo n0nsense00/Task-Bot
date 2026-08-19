@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 async def brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /brief: send the morning-brief message on demand."""
     message = update.effective_message
-    if message is None:
+    chat = update.effective_chat
+    if message is None or chat is None:
         return
-    text = build_morning_brief()
+    text = build_morning_brief(chat.id)
     await message.reply_text(text, parse_mode=ParseMode.HTML)
     logger.info("Morning brief sent via /brief")

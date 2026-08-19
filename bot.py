@@ -31,15 +31,13 @@ from config import (
     CMD_BRIEF,
     CMD_CANCEL,
     CMD_CLEAR,
+    CMD_DEADLINES,
     CMD_DELETE,
     CMD_DONE,
     CMD_HELP,
     CMD_KILL,
     CMD_REVIVE,
-    CMD_SEMESTER,
     CMD_START,
-    CMD_TODAY,
-    CMD_WEEK,
     TELEGRAM_BOT_TOKEN,
 )
 from database.db import init_db
@@ -56,15 +54,16 @@ from handlers.callbacks import (
     delete_confirm_callback,
     delete_request_callback,
     done_callback,
+    manage_dashboard_callback,
+    manage_deadline_item_callback,
+    manage_deadlines_callback,
 )
 from handlers.edit_task import build_edit_conversation
 from handlers.errors import error_handler, unknown_command
 from handlers.tasks import (
+    deadlines,
     delete_task_cmd,
     done_task_cmd,
-    semester,
-    today,
-    week,
 )
 from scheduler import build_scheduler, catch_up_missed_brief
 from utils.tracking_bot import TrackingBot
@@ -122,13 +121,11 @@ def _bot_command_menu() -> list[BotCommand]:
     types '/' in the chat — eliminates the need to remember command names.
     """
     return [
-        BotCommand(CMD_TODAY, "Tasks due today"),
-        BotCommand(CMD_WEEK, "This week + next week"),
-        BotCommand(CMD_SEMESTER, "Upcoming midterms & finals"),
-        BotCommand(CMD_BRIEF, "Send today's morning summary now"),
-        BotCommand(CMD_ADD, "Add a new task"),
-        BotCommand(CMD_DONE, "Mark a task done by id"),
-        BotCommand(CMD_DELETE, "Delete a task by id"),
+        BotCommand(CMD_DEADLINES, "View upcoming deadlines"),
+        BotCommand(CMD_ADD, "Add a deadline"),
+        BotCommand(CMD_BRIEF, "Preview deadlines due soon"),
+        BotCommand(CMD_DONE, "Mark a deadline complete by id"),
+        BotCommand(CMD_DELETE, "Delete a deadline by id"),
         BotCommand(CMD_CANCEL, "Cancel current /add or /edit flow"),
         BotCommand(CMD_HELP, "Show command list"),
         BotCommand(CMD_START, "Welcome message"),
@@ -184,9 +181,7 @@ def main() -> None:
     # Direct commands first so they take precedence over the catch-all below.
     application.add_handler(CommandHandler(CMD_START, start))
     application.add_handler(CommandHandler(CMD_HELP, help_command))
-    application.add_handler(CommandHandler(CMD_TODAY, today))
-    application.add_handler(CommandHandler(CMD_WEEK, week))
-    application.add_handler(CommandHandler(CMD_SEMESTER, semester))
+    application.add_handler(CommandHandler(CMD_DEADLINES, deadlines))
     application.add_handler(CommandHandler(CMD_BRIEF, brief))
     application.add_handler(CommandHandler(CMD_DONE, done_task_cmd))
     application.add_handler(CommandHandler(CMD_DELETE, delete_task_cmd))
@@ -201,8 +196,21 @@ def main() -> None:
     application.add_handler(build_add_conversation())
     application.add_handler(build_edit_conversation())
 
-    # Inline-keyboard callbacks attached to /today task buttons. Patterns are
-    # anchored with ``^`` and ``$`` so the colon-count disambiguates between
+    # Compact /deadlines manager: dashboard → paginated picker → item actions.
+    application.add_handler(
+        CallbackQueryHandler(manage_deadlines_callback, pattern=r"^manage:\d+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            manage_deadline_item_callback, pattern=r"^manageitem:\d+:\d+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(manage_dashboard_callback, pattern=r"^managedash$")
+    )
+
+    # Item-action callbacks. Patterns are anchored with ``^`` and ``$`` so
+    # the colon-count disambiguates between
     # ``del:N`` (entry → confirmation prompt) and ``del:yes:N`` /
     # ``del:no:N`` (confirmation answer).
     application.add_handler(
@@ -237,11 +245,8 @@ def main() -> None:
     )
     if ALLOWED_CHAT_ID == 0:
         logger.warning(
-            "ALLOWED_CHAT_ID is unset — bot is in DISCOVERY MODE: every "
-            "incoming message will be rejected and its chat id logged. Add "
-            "the bot to the target group, send a message, copy the chat_id "
-            "from the next 'Unauthorized chat' warning into the env var, and "
-            "restart."
+            "ALLOWED_CHAT_ID is unset — group access is disabled. "
+            "Owner private messages still work normally."
         )
     try:
         application.run_polling()

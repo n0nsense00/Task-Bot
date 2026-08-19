@@ -1,0 +1,17 @@
+[Unit]
+Description=Task-Bot Telegram deadline tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/task-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/task-bot/venv/bin/python /home/ubuntu/task-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

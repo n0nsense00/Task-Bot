@@ -1,8 +1,7 @@
 """Data models for Task-Bot.
 
-A single ``Task`` dataclass represents every item the bot tracks — lectures,
-tutorials, assignments, exams, and personal to-dos — distinguished by the
-``task_type`` field.
+A single ``Task`` dataclass represents every assessed deadline the bot tracks,
+distinguished by the ``task_type`` field.
 """
 from __future__ import annotations
 
@@ -10,21 +9,29 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
-TASK_TYPE_LECTURE: str = "lecture"
-TASK_TYPE_TUTORIAL: str = "tutorial"
+TASK_TYPE_QUIZ: str = "quiz"
+TASK_TYPE_LAB: str = "lab"
 TASK_TYPE_ASSIGNMENT: str = "assignment"
+TASK_TYPE_PROJECT: str = "project"
 TASK_TYPE_MIDTERM: str = "midterm"
 TASK_TYPE_FINAL: str = "final"
-TASK_TYPE_PERSONAL: str = "personal"
+TASK_TYPE_OTHER: str = "other"
 
 TASK_TYPES: tuple[str, ...] = (
-    TASK_TYPE_LECTURE,
-    TASK_TYPE_TUTORIAL,
+    TASK_TYPE_QUIZ,
+    TASK_TYPE_LAB,
     TASK_TYPE_ASSIGNMENT,
+    TASK_TYPE_PROJECT,
     TASK_TYPE_MIDTERM,
     TASK_TYPE_FINAL,
-    TASK_TYPE_PERSONAL,
+    TASK_TYPE_OTHER,
 )
+
+# Accepted only so older databases can be migrated without losing rows. These
+# are deliberately absent from the /add and /edit pickers: the bot now focuses
+# on assessed deadlines instead of class timetables.
+LEGACY_TASK_TYPES: tuple[str, ...] = ("lecture", "tutorial", "personal")
+ALL_TASK_TYPES: tuple[str, ...] = TASK_TYPES + LEGACY_TASK_TYPES
 
 
 @dataclass
@@ -36,7 +43,8 @@ class Task:
     inserted; ``created_at`` is set by the DB layer on insert and is ``None``
     on freshly-constructed, not-yet-persisted instances.
 
-    ``due_time`` is an optional ``HH:MM`` string (24-hour). Stored as text in
+    ``chat_id`` is Telegram's conversation id and scopes the row to one DM or
+    group. ``due_time`` is an optional ``HH:MM`` string (24-hour). Stored as text in
     SQLite to keep the schema migration trivial and avoid timezone confusion
     when combined with ``due_date``. ``None`` means "all day, no specific time".
     """
@@ -44,6 +52,7 @@ class Task:
     title: str
     task_type: str
     due_date: date
+    chat_id: Optional[int] = None
     module_code: Optional[str] = None
     week_number: Optional[int] = None
     notes: Optional[str] = None

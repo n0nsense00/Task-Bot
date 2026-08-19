@@ -3,7 +3,7 @@
 Usage (from the project root with the venv active):
 
     python seed/seed_tasks.py                  # append to existing data
-    python seed/seed_tasks.py --replace        # wipe all existing tasks first (prompts y/n)
+    python seed/seed_tasks.py --replace        # replace owner's personal tasks (prompts y/n)
     python seed/seed_tasks.py --file path.csv  # load from a different CSV
 
 The CSV must have one of these header rows:
@@ -36,10 +36,10 @@ from database.db import (  # noqa: E402  (sys.path hack above is intentional)
     add_tasks,
     count_tasks,
     delete_all_tasks,
+    get_default_chat_id,
     init_db,
 )
 from database.models import (  # noqa: E402
-    TASK_TYPE_PERSONAL,
     TASK_TYPES,
     Task,
 )
@@ -65,12 +65,13 @@ ACCEPTED_COLUMNS: tuple[tuple[str, ...], ...] = (BASE_COLUMNS, TIME_COLUMNS)
 DEFAULT_CSV_PATH: Path = _PROJECT_ROOT / "seed" / "seed_data.csv"
 
 _PLURAL_LABEL: dict[str, str] = {
-    "lecture": "lectures",
-    "tutorial": "tutorials",
+    "quiz": "quizzes",
+    "lab": "labs",
     "assignment": "assignments",
+    "project": "projects",
     "midterm": "midterms",
     "final": "finals",
-    "personal": "personal tasks",
+    "other": "other deadlines",
 }
 
 
@@ -132,7 +133,7 @@ def _validate_row(raw: _RawRow) -> Task:
     Validation rules:
       - title: non-empty
       - task_type: one of ``TASK_TYPES``
-      - module_code: required unless task_type is 'personal'
+      - module_code: required
       - due_date: parseable as ``YYYY-MM-DD``
       - due_time: blank, or ``HH:MM`` 24-hour time
       - week_number: blank, or integer 1..13
@@ -152,10 +153,8 @@ def _validate_row(raw: _RawRow) -> Task:
         )
 
     module_code = (data.get("module_code") or "").strip() or None
-    if module_code is None and task_type != TASK_TYPE_PERSONAL:
-        raise ValueError(
-            f"module_code is required for task_type={task_type!r}"
-        )
+    if module_code is None:
+        raise ValueError("module_code is required")
 
     due_raw = (data.get("due_date") or "").strip()
     if not due_raw:
@@ -245,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--replace",
         action="store_true",
-        help="Delete all existing tasks before importing (prompts for confirmation).",
+        help="Delete the owner's personal tasks before importing (prompts for confirmation).",
     )
     parser.add_argument(
         "--file",
@@ -280,13 +279,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     init_db()
+    target_chat_id = get_default_chat_id()
+    for task in tasks:
+        task.chat_id = target_chat_id
 
     if args.replace:
-        existing = count_tasks()
+        existing = count_tasks(target_chat_id)
         if not _confirm_replace(existing):
             print("Aborted. No changes made.")
             return 1
-        deleted = delete_all_tasks()
+        deleted = delete_all_tasks(target_chat_id)
         print(f"Deleted {deleted} existing tasks.")
 
     add_tasks(tasks)

@@ -2,20 +2,19 @@
 
 Step order (each step transitions on user input)::
 
-    TYPE        Type picker (📚 Lecture / 📝 Tutorial / ... / ✏️ Personal)
+    TYPE        Assessment picker (Quiz / Lab / Assignment / ... / Final)
     MODULE      Module picker (seeded NTU modules + Other / Skip)
     MODULE_TEXT Sub-state when user picks "Other (type it)…"
     TITLE       Free-text input
     DATE        Inline calendar (◀ prev / next ▶ / shortcuts / day grid)
     TIME        Hybrid time picker (presets + Custom hour-then-minute)
-    WEEK        Free-text 1-13 or 'skip'
     NOTES       Free-text or 'skip', then save and END
 
 The DATE state stays put across month-navigation taps — only ``select`` /
 ``short`` callbacks advance to TIME. The TIME state similarly stays put
 when the user picks "Custom…" (re-renders to the hour picker) or taps an
 hour (re-renders to the minute picker for that hour) — only ``set`` / ``skip``
-advance to WEEK.
+advance to NOTES.
 
 The in-progress draft lives in ``context.user_data['new_task_draft']`` and
 is cleared on END / /cancel so future conversations start fresh.
@@ -39,7 +38,7 @@ from telegram.ext import (
 
 from config import CMD_ADD, CMD_CANCEL
 from database.db import add_task, get_modules
-from database.models import TASK_TYPE_PERSONAL, TASK_TYPES, Task
+from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
 from utils.calendar_widget import (
     build_calendar_keyboard,
@@ -55,10 +54,8 @@ from utils.format import (
     TYPE_EMOJI,
     build_module_keyboard,
     build_notes_keyboard,
-    build_week_keyboard,
     format_task_card,
     parse_notes_callback,
-    parse_week_callback,
 )
 from utils.timepicker import (
     build_hour_keyboard,
@@ -70,7 +67,7 @@ from utils.timepicker import (
 logger = logging.getLogger(__name__)
 
 # Conversation states.
-TYPE, MODULE, MODULE_TEXT, TITLE, DATE, TIME, WEEK, NOTES = range(8)
+TYPE, MODULE, MODULE_TEXT, TITLE, DATE, TIME, NOTES = range(7)
 
 _SKIP_KEYWORD: str = "skip"
 _ADD_TYPE_CB_PREFIX: str = "addtype"
@@ -87,7 +84,7 @@ def _draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
 
 
 def _type_keyboard() -> InlineKeyboardMarkup:
-    """Build the 6-button task-type picker (2 per row, with type emojis)."""
+    """Build the assessed-deadline type picker, two buttons per row."""
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for t in TASK_TYPES:
@@ -115,7 +112,7 @@ async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     context.user_data[_USER_DATA_KEY] = {}
     await message.reply_text(
-        "📝 <b>New task</b>\n\nWhat type of task?",
+        "📝 <b>New deadline</b>\n\nWhat kind of assessment is it?",
         parse_mode=ParseMode.HTML,
         reply_markup=_type_keyboard(),
     )
@@ -146,8 +143,8 @@ async def add_task_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     modules = get_modules()
     body = (
-        "📝 <b>New task</b>\n\n"
-        f"Type: {chosen}\n\n"
+        "📝 <b>New deadline</b>\n\n"
+        f"Type: {chosen.capitalize()}\n\n"
         "Pick a module:"
     )
     if not modules:
@@ -160,7 +157,7 @@ async def add_task_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         body,
         parse_mode=ParseMode.HTML,
         reply_markup=build_module_keyboard(
-            modules, include_skip=(chosen == TASK_TYPE_PERSONAL)
+            modules, include_skip=False
         ),
     )
     return MODULE
@@ -188,13 +185,7 @@ async def add_module_picked(
         return ConversationHandler.END
 
     if rest == "skip":
-        _draft(context)["module_code"] = None
-        await query.edit_message_text(
-            "Module: <i>skipped</i>\n\n"
-            "What's the title? (send the text, or /cancel)",
-            parse_mode=ParseMode.HTML,
-        )
-        return TITLE
+        return MODULE
 
     if rest == "other":
         await query.edit_message_text(
@@ -337,11 +328,11 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         await query.edit_message_text(
             "Time: <i>all day</i>\n\n"
-            "📊 <b>Which week?</b>",
+            "📋 <b>Notes?</b> Tap Skip, or send any text:",
             parse_mode=ParseMode.HTML,
-            reply_markup=build_week_keyboard(include_skip=True),
+            reply_markup=build_notes_keyboard(),
         )
-        return WEEK
+        return NOTES
 
     if action == "custom":
         await query.answer()
@@ -377,52 +368,14 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         await query.edit_message_text(
             f"Time: <b>{time_str}</b>\n\n"
-            "📊 <b>Which week?</b>",
+            "📋 <b>Notes?</b> Tap Skip, or send any text:",
             parse_mode=ParseMode.HTML,
-            reply_markup=build_week_keyboard(include_skip=True),
+            reply_markup=build_notes_keyboard(),
         )
-        return WEEK
+        return NOTES
 
     await query.answer()
     return TIME
-
-
-@authorized_only
-@safe
-async def add_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """WEEK state: receive week-picker callback, advance to NOTES.
-
-    Pure tap interaction now — no text typing. Numbered buttons 1-13, plus
-    Skip (no week) and Cancel.
-    """
-    query = update.callback_query
-    if query is None or query.data is None:
-        return WEEK
-    await query.answer()
-
-    action, payload = parse_week_callback(query.data)
-
-    if action == "cancel":
-        await query.edit_message_text("Cancelled. Nothing was added.")
-        context.user_data.pop(_USER_DATA_KEY, None)
-        return ConversationHandler.END
-
-    if action == "skip":
-        _draft(context)["week_number"] = None
-        week_label = "<i>skipped</i>"
-    elif action == "set" and payload is not None and 1 <= payload <= 13:
-        _draft(context)["week_number"] = payload
-        week_label = f"<b>Week {payload}</b>"
-    else:
-        return WEEK
-
-    await query.edit_message_text(
-        f"Week: {week_label}\n\n"
-        "📋 <b>Notes?</b> Tap Skip, or send any text:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=build_notes_keyboard(),
-    )
-    return NOTES
 
 
 async def _finalize_add(
@@ -438,7 +391,7 @@ async def _finalize_add(
     stays in one place.
     """
     draft = _draft(context)
-    required = ("title", "task_type", "due_date")
+    required = ("title", "task_type", "module_code", "due_date")
     if any(k not in draft for k in required):
         target = update.effective_message
         if target is not None:
@@ -449,10 +402,14 @@ async def _finalize_add(
         return ConversationHandler.END
 
     try:
+        chat = update.effective_chat
+        if chat is None:
+            raise RuntimeError("Cannot determine which Telegram chat owns this task")
         task = Task(
             title=draft["title"],
             task_type=draft["task_type"],
             due_date=draft["due_date"],
+            chat_id=chat.id,
             module_code=draft.get("module_code"),
             week_number=draft.get("week_number"),
             notes=draft.get("notes"),
@@ -533,7 +490,7 @@ async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def build_add_conversation() -> ConversationHandler:
-    """Construct the ConversationHandler wiring all 8 /add states."""
+    """Construct the deadline-focused /add conversation."""
     return ConversationHandler(
         entry_points=[CommandHandler(CMD_ADD, add_entry)],
         states={
@@ -557,9 +514,6 @@ def build_add_conversation() -> ConversationHandler:
             TIME: [
                 CallbackQueryHandler(add_time, pattern=r"^time:"),
                 CallbackQueryHandler(add_time, pattern=r"^timehr:"),
-            ],
-            WEEK: [
-                CallbackQueryHandler(add_week, pattern=r"^week:"),
             ],
             NOTES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_notes),

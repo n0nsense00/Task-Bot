@@ -1,6 +1,6 @@
 """SQLite data layer for Task-Bot.
 
-Schema lives in a single ``tasks`` table. Dates are stored as ISO strings
+Schema lives in a single chat-scoped ``tasks`` table. Dates are stored as ISO strings
 (``YYYY-MM-DD``) and converted to ``datetime.date`` on read; booleans are
 stored as ``0``/``1`` integers. All queries go through ``_get_conn``, a
 context manager that commits on clean exit, rolls back on exception, and
@@ -38,9 +38,11 @@ DB_PATH: Path = (
 _SCHEMA_SQL: str = """
 CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
     title       TEXT    NOT NULL,
     task_type   TEXT    NOT NULL CHECK(task_type IN
-                    ('lecture','tutorial','assignment','midterm','final','personal')),
+                    ('quiz','lab','assignment','project','midterm','final','other',
+                     'lecture','tutorial','personal')),
     module_code TEXT,
     due_date    TEXT    NOT NULL,
     due_time    TEXT,
@@ -61,10 +63,26 @@ CREATE TABLE IF NOT EXISTS modules (
 
 _TASK_INSERT_SQL: str = """
 INSERT INTO tasks
-    (title, task_type, module_code, due_date, due_time,
+    (chat_id, title, task_type, module_code, due_date, due_time,
      week_number, notes, completed, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+
+def get_default_chat_id() -> int:
+    """Return the configured owner DM id used for legacy rows and CSV seeds."""
+    raw = os.getenv("MY_TELEGRAM_ID", "").strip()
+    try:
+        chat_id = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "MY_TELEGRAM_ID must be configured before initializing the database"
+        ) from exc
+    if chat_id == 0:
+        raise RuntimeError(
+            "MY_TELEGRAM_ID must be configured before initializing the database"
+        )
+    return chat_id
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
@@ -80,6 +98,61 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "due_time" not in columns:
         logger.info("Migrating: adding due_time column to tasks")
         conn.execute("ALTER TABLE tasks ADD COLUMN due_time TEXT")
+    if "chat_id" not in columns:
+        owner_chat_id = get_default_chat_id()
+        logger.info(
+            "Migrating: assigning existing tasks to owner chat_id=%s",
+            owner_chat_id,
+        )
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN chat_id INTEGER NOT NULL DEFAULT "
+            f"{owner_chat_id}"
+        )
+
+    # SQLite cannot alter a CHECK constraint in place. Rebuild older task
+    # tables once so deadline-focused types can be inserted while preserving
+    # every existing row and id.
+    table_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone()
+    table_sql = str(table_row[0] or "") if table_row else ""
+    if "'quiz'" not in table_sql:
+        logger.info("Migrating: expanding task types for deadline tracking")
+        conn.execute("ALTER TABLE tasks RENAME TO tasks_legacy")
+        conn.execute(
+            """CREATE TABLE tasks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                title       TEXT    NOT NULL,
+                task_type   TEXT    NOT NULL CHECK(task_type IN
+                    ('quiz','lab','assignment','project','midterm','final','other',
+                     'lecture','tutorial','personal')),
+                module_code TEXT,
+                due_date    TEXT    NOT NULL,
+                due_time    TEXT,
+                week_number INTEGER,
+                notes       TEXT,
+                completed   INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+                created_at  TEXT    NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO tasks
+                (id, chat_id, title, task_type, module_code, due_date, due_time,
+                 week_number, notes, completed, created_at)
+               SELECT id, chat_id, title, task_type, module_code, due_date, due_time,
+                      week_number, notes, completed, created_at
+                 FROM tasks_legacy"""
+        )
+        conn.execute("DROP TABLE tasks_legacy")
+        conn.execute("CREATE INDEX idx_tasks_due_date ON tasks(due_date)")
+        conn.execute("CREATE INDEX idx_tasks_week_number ON tasks(week_number)")
+        conn.execute("CREATE INDEX idx_tasks_type ON tasks(task_type)")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_chat_due "
+        "ON tasks(chat_id, due_date)"
+    )
 
 
 @contextmanager
@@ -115,6 +188,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         due_time = None
     return Task(
         id=row["id"],
+        chat_id=row["chat_id"],
         title=row["title"],
         task_type=row["task_type"],
         module_code=row["module_code"],
@@ -168,9 +242,15 @@ def add_tasks(tasks: list[Task]) -> list[int]:
     ids: list[int] = []
     with _get_conn() as conn:
         for task in tasks:
+            chat_id = (
+                task.chat_id
+                if task.chat_id is not None
+                else get_default_chat_id()
+            )
             cur = conn.execute(
                 _TASK_INSERT_SQL,
                 (
+                    chat_id,
                     task.title,
                     task.task_type,
                     task.module_code,
@@ -183,14 +263,15 @@ def add_tasks(tasks: list[Task]) -> list[int]:
                 ),
             )
             ids.append(int(cur.lastrowid))
+            task.chat_id = chat_id
     return ids
 
 
-def get_task(task_id: int) -> Optional[Task]:
-    """Return the ``Task`` with id ``task_id``, or ``None`` if not found."""
+def get_task(task_id: int, chat_id: int) -> Optional[Task]:
+    """Return task ``task_id`` only when it belongs to ``chat_id``."""
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            "SELECT * FROM tasks WHERE id = ? AND chat_id = ?", (task_id, chat_id)
         ).fetchone()
     return _row_to_task(row) if row else None
 
@@ -203,12 +284,14 @@ def update_task(task: Task) -> bool:
     """
     if task.id is None:
         raise ValueError("update_task requires task.id to be set")
+    if task.chat_id is None:
+        raise ValueError("update_task requires task.chat_id to be set")
     with _get_conn() as conn:
         cur = conn.execute(
             """UPDATE tasks
                  SET title = ?, task_type = ?, module_code = ?, due_date = ?,
                      due_time = ?, week_number = ?, notes = ?, completed = ?
-               WHERE id = ?""",
+               WHERE id = ? AND chat_id = ?""",
             (
                 task.title,
                 task.task_type,
@@ -219,49 +302,53 @@ def update_task(task: Task) -> bool:
                 task.notes,
                 1 if task.completed else 0,
                 task.id,
+                task.chat_id,
             ),
         )
         return cur.rowcount > 0
 
 
-def delete_task(task_id: int) -> bool:
-    """Delete the row with id ``task_id``. Returns ``True`` if a row was removed."""
-    with _get_conn() as conn:
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        return cur.rowcount > 0
-
-
-def mark_complete(task_id: int) -> bool:
-    """Mark the row with id ``task_id`` as completed. Returns ``True`` on hit."""
+def delete_task(task_id: int, chat_id: int) -> bool:
+    """Delete ``task_id`` only from ``chat_id``. Return whether it existed."""
     with _get_conn() as conn:
         cur = conn.execute(
-            "UPDATE tasks SET completed = 1 WHERE id = ?", (task_id,)
+            "DELETE FROM tasks WHERE id = ? AND chat_id = ?", (task_id, chat_id)
         )
         return cur.rowcount > 0
 
 
-def get_tasks_for_date(target_date: date) -> list[Task]:
-    """Return all tasks whose ``due_date`` is exactly ``target_date``."""
+def mark_complete(task_id: int, chat_id: int) -> bool:
+    """Complete ``task_id`` only when it belongs to ``chat_id``."""
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE tasks SET completed = 1 WHERE id = ? AND chat_id = ?",
+            (task_id, chat_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_tasks_for_date(target_date: date, chat_id: int) -> list[Task]:
+    """Return tasks in ``chat_id`` due exactly on ``target_date``."""
     with _get_conn() as conn:
         rows = conn.execute(
             """SELECT * FROM tasks
-               WHERE due_date = ?
+               WHERE due_date = ? AND chat_id = ?
                ORDER BY task_type, due_time IS NULL, due_time, title""",
-            (target_date.isoformat(),),
+            (target_date.isoformat(), chat_id),
         ).fetchall()
     return [_row_to_task(r) for r in rows]
 
 
 def get_tasks_for_week(
-    week_num: int, task_types: Optional[list[str]] = None
+    week_num: int, chat_id: int, task_types: Optional[list[str]] = None
 ) -> list[Task]:
     """Return tasks in ``week_num``, optionally filtered by ``task_types``.
 
     When ``task_types`` is ``None`` or empty, no type filter is applied.
     Results are sorted by ``due_date``, then type, then title.
     """
-    query = "SELECT * FROM tasks WHERE week_number = ?"
-    params: list = [week_num]
+    query = "SELECT * FROM tasks WHERE week_number = ? AND chat_id = ?"
+    params: list = [week_num, chat_id]
     if task_types:
         placeholders = ",".join("?" * len(task_types))
         query += f" AND task_type IN ({placeholders})"
@@ -272,47 +359,61 @@ def get_tasks_for_week(
     return [_row_to_task(r) for r in rows]
 
 
-def get_semester_deadlines() -> list[Task]:
-    """Return midterms and finals across the whole semester, sorted by date."""
-    with _get_conn() as conn:
-        rows = conn.execute(
-            """SELECT * FROM tasks
-               WHERE task_type IN ('midterm', 'final')
-               ORDER BY due_date, due_time IS NULL, due_time, title""",
-        ).fetchall()
-    return [_row_to_task(r) for r in rows]
+def get_semester_deadlines(chat_id: int) -> list[Task]:
+    """Return pending assessed deadlines for one chat, sorted chronologically.
 
-
-def get_all_pending() -> list[Task]:
-    """Return every uncompleted task, earliest due-date first."""
+    The name remains for compatibility with older callers. Legacy timetable
+    rows (lecture/tutorial/personal) are excluded from the deadline view.
+    """
     with _get_conn() as conn:
         rows = conn.execute(
             """SELECT * FROM tasks
                WHERE completed = 0
+                 AND chat_id = ?
+                 AND task_type IN
+                    ('quiz','lab','assignment','project','midterm','final','other')
                ORDER BY due_date, due_time IS NULL, due_time, title""",
+            (chat_id,),
         ).fetchall()
     return [_row_to_task(r) for r in rows]
 
 
-def count_tasks() -> int:
-    """Return the total number of rows in the ``tasks`` table."""
+def get_all_pending(chat_id: int) -> list[Task]:
+    """Return uncompleted tasks in one chat, earliest due-date first."""
     with _get_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        rows = conn.execute(
+            """SELECT * FROM tasks
+               WHERE completed = 0 AND chat_id = ?
+               ORDER BY due_date, due_time IS NULL, due_time, title""",
+            (chat_id,),
+        ).fetchall()
+    return [_row_to_task(r) for r in rows]
+
+
+def count_tasks(chat_id: int | None = None) -> int:
+    """Count all tasks, or only tasks belonging to ``chat_id`` when provided."""
+    with _get_conn() as conn:
+        if chat_id is None:
+            row = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
     return int(row[0])
 
 
-def delete_all_tasks() -> int:
-    """Delete every row from ``tasks`` and return the number removed.
+def delete_all_tasks(chat_id: int) -> int:
+    """Delete every task owned by ``chat_id`` and return the number removed.
 
     Intended for the bulk-replace path in the seeder. Deliberately not wired
     to any command handler — there is no ``/reset`` in the bot.
     """
     with _get_conn() as conn:
-        cur = conn.execute("DELETE FROM tasks")
+        cur = conn.execute("DELETE FROM tasks WHERE chat_id = ?", (chat_id,))
         return cur.rowcount
 
 
-def cleanup_past_deadlines(today: date) -> int:
+def cleanup_past_deadlines(today: date, chat_id: int) -> int:
     """Delete every midterm/final whose ``due_date`` is strictly before ``today``.
 
     Scope is intentionally narrow — only ``midterm`` and ``final`` rows are
@@ -320,17 +421,16 @@ def cleanup_past_deadlines(today: date) -> int:
     wants to disappear after the date passes. Lectures, tutorials,
     assignments, and personal tasks are left alone (manual ``/delete`` only).
 
-    Called by both the daily scheduler job and lazy cleanup on /semester so
-    the view always reflects what's still ahead, even if the scheduler has
-    been down.
+    Retained as a narrow database maintenance helper for older data.
     """
     today_iso = today.isoformat()
     with _get_conn() as conn:
         cur = conn.execute(
             """DELETE FROM tasks
                WHERE task_type IN ('midterm', 'final')
+                 AND chat_id = ?
                  AND due_date < ?""",
-            (today_iso,),
+            (chat_id, today_iso),
         )
         return cur.rowcount
 

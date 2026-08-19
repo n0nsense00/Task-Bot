@@ -1,4 +1,4 @@
-"""Inline-keyboard callback handlers for the /today task buttons.
+"""Inline-keyboard callback handlers for the /deadlines action buttons.
 
 The 📝 Edit flow is intentionally handled elsewhere — it's a multi-step
 ``ConversationHandler`` that lives in :mod:`handlers.edit_task`. This module
@@ -6,7 +6,10 @@ only contains the single-shot Done / Delete-request / Delete-confirm flows
 because they're stateless and don't fit the conversation model.
 
 Callback-data formats handled here:
-    ``done:N``       — mark task #N complete, re-render /today in place
+    ``manage:N``     — show page N of the compact deadline picker
+    ``manageitem:N:P`` — show task #N's actions, returning to page P
+    ``managedash``   — return to the main /deadlines dashboard
+    ``done:N``       — mark task #N complete, re-render /deadlines in place
     ``del:N``        — entry point: show Yes/No confirmation in place
     ``del:yes:N``    — confirmed: delete task #N, show "Deleted" card
     ``del:no:N``     — cancelled: show "Cancelled" message
@@ -18,71 +21,127 @@ disambiguated by colon count — see :func:`delete_request_callback` and
 from __future__ import annotations
 
 import logging
-from datetime import date
-
-from telegram import InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from database.db import (
-    delete_task,
-    get_task,
-    get_tasks_for_date,
-    mark_complete,
-)
+from database.db import delete_task, get_task, mark_complete
+from handlers.tasks import render_deadline_picker, render_deadlines
 from utils.auth import authorized_only
 from utils.errors import safe
 from utils.format import (
     CB_DELETE,
     CB_DONE,
-    DIVIDER,
+    CB_MANAGE,
+    CB_MANAGE_DASHBOARD,
+    CB_MANAGE_ITEM,
+    build_deadline_action_keyboard,
     build_delete_confirmation_keyboard,
-    build_task_keyboard,
-    format_grouped_today,
     format_task_card,
-    morning_greeting,
-    todays_tip,
 )
 
 logger = logging.getLogger(__name__)
 
-_NO_TASKS_TODAY_MESSAGE: str = "🎉 Nothing scheduled for today. Enjoy!"
 
+@authorized_only
+@safe
+async def manage_deadlines_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle ``manage:N`` by opening the requested deadline-picker page."""
+    query = update.callback_query
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
+        return
 
-def _render_today_message() -> tuple[str, InlineKeyboardMarkup | None]:
-    """Rebuild the /today text + keyboard from current DB state.
+    parts = query.data.split(":", 1)
+    if len(parts) != 2 or parts[0] != CB_MANAGE:
+        await query.answer()
+        return
+    try:
+        page = int(parts[1])
+    except ValueError:
+        await query.answer("Invalid page", show_alert=True)
+        return
 
-    Called after Done/Delete mutations so the re-rendered message reflects
-    the live row set. Mirrors the layout used by the /today slash handler
-    in :mod:`handlers.tasks` — keep them in sync if either side changes.
-    """
-    today = date.today()
-    tasks = get_tasks_for_date(today)
-    if not tasks:
-        return (_NO_TASKS_TODAY_MESSAGE, None)
-
-    lines: list[str] = [morning_greeting(), "", DIVIDER]
-    lines.extend(format_grouped_today(tasks, today))
-    lines.append("")
-    lines.append(DIVIDER)
-    lines.append("")
-    plural = "s" if len(tasks) != 1 else ""
-    lines.append(f"<i>{len(tasks)} task{plural} today</i>")
-    lines.append("")
-    lines.append(todays_tip())
-    return ("\n".join(lines), build_task_keyboard(tasks))
+    await query.answer()
+    text, keyboard = render_deadline_picker(chat.id, page)
+    await query.edit_message_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+    )
 
 
 @authorized_only
 @safe
+async def manage_deadline_item_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle ``manageitem:N:P`` and show actions below the selected item."""
+    query = update.callback_query
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != CB_MANAGE_ITEM:
+        await query.answer()
+        return
+    try:
+        task_id = int(parts[1])
+        page = max(int(parts[2]), 0)
+    except ValueError:
+        await query.answer("Invalid deadline", show_alert=True)
+        return
+
+    task = get_task(task_id, chat.id)
+    if task is None or task.completed:
+        await query.answer("That deadline is no longer pending", show_alert=True)
+        text, keyboard = render_deadline_picker(chat.id, page)
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+        )
+        return
+
+    await query.answer()
+    text = (
+        "⚙️ <b>Manage Deadline</b>\n\n"
+        + format_task_card(task)
+        + "\n\n<i>Choose an action below.</i>"
+    )
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_deadline_action_keyboard(task_id, page),
+    )
+
+
+@authorized_only
+@safe
+async def manage_dashboard_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle ``managedash`` by returning to the main deadline dashboard."""
+    query = update.callback_query
+    chat = update.effective_chat
+    if query is None or query.data != CB_MANAGE_DASHBOARD or chat is None:
+        return
+    await query.answer()
+    text, keyboard = render_deadlines(chat.id)
+    await query.edit_message_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+    )
+
+@authorized_only
+@safe
 async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle ``done:N``: mark task complete and re-render /today in place.
+    """Handle ``done:N``: complete it and refresh /deadlines in place.
 
     A toast confirmation appears at the top of Telegram via ``query.answer``;
     the message body is then edited to the refreshed task list.
     """
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return
 
     parts = query.data.split(":", 1)
@@ -96,15 +155,15 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("Invalid task id", show_alert=True)
         return
 
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.answer(f"Task #{task_id} not found", show_alert=True)
         return
 
-    mark_complete(task_id)
+    mark_complete(task_id, chat.id)
     await query.answer(f"Marked done: {task.title}")
 
-    text, keyboard = _render_today_message()
+    text, keyboard = render_deadlines(chat.id)
     try:
         await query.edit_message_text(
             text, parse_mode=ParseMode.HTML, reply_markup=keyboard
@@ -112,7 +171,7 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         # Editing fails for messages older than 48h, or if the message has
         # since been deleted. Don't crash — the toast already confirmed.
-        logger.exception("Failed to edit /today after Done tap")
+        logger.exception("Failed to refresh /deadlines after Done tap")
 
 
 @authorized_only
@@ -127,7 +186,8 @@ async def delete_request_callback(
     ``del:`` prefix, so the dispatch pattern in ``bot.py`` is regex-based.
     """
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return
 
     parts = query.data.split(":")
@@ -142,7 +202,7 @@ async def delete_request_callback(
         await query.edit_message_text("Invalid task id.")
         return
 
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text(f"Task #{task_id} not found.")
         return
@@ -166,12 +226,13 @@ async def delete_confirm_callback(
     funnel into this handler — they construct identical Yes/No keyboards via
     :func:`utils.format.build_delete_confirmation_keyboard`. After the
     decision, the message is edited to a "Deleted" or "Cancelled" card; we
-    deliberately do **not** auto-render /today, because the user may have
-    invoked /delete in isolation and a sudden /today rebuild would be
+    deliberately do **not** auto-render /deadlines, because the user may have
+    invoked /delete in isolation and a sudden dashboard rebuild would be
     surprising.
     """
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return
 
     parts = query.data.split(":")
@@ -193,7 +254,7 @@ async def delete_confirm_callback(
     if action != "yes":
         return
 
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.answer("Already deleted")
         await query.edit_message_text(
@@ -201,7 +262,7 @@ async def delete_confirm_callback(
         )
         return
 
-    delete_task(task_id)
+    delete_task(task_id, chat.id)
     await query.answer(f"Deleted: {task.title}")
     await query.edit_message_text(
         "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),

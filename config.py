@@ -8,7 +8,6 @@ at first use.
 from __future__ import annotations
 
 import os
-from datetime import date
 
 from dotenv import load_dotenv
 
@@ -60,17 +59,14 @@ MY_TELEGRAM_ID: int = _require_int("MY_TELEGRAM_ID")
 # any other chat (DMs, other groups, channels) are dropped at the auth
 # decorator. Group IDs are negative — supergroups start with -100...
 #
-# Optional: if unset (or set to 0), the bot starts in "discovery mode" and
-# rejects every incoming message — but each rejection is logged with the
-# chat id, so you can spin up the bot, send one message in the target group,
-# read the chat id from the logs, then set ALLOWED_CHAT_ID and redeploy.
+# Optional: if unset (or set to 0), only the owner can use the bot. The owner
+# can send /start in a target group and read its chat id from the startup logs,
+# then set ALLOWED_CHAT_ID and restart.
 ALLOWED_CHAT_ID: int = _optional_int("ALLOWED_CHAT_ID", 0)
 
 CMD_START: str = "start"
 CMD_HELP: str = "help"
-CMD_TODAY: str = "today"
-CMD_WEEK: str = "week"
-CMD_SEMESTER: str = "semester"
+CMD_DEADLINES: str = "deadlines"
 CMD_ADD: str = "add"
 CMD_DONE: str = "done"
 CMD_DELETE: str = "delete"
@@ -79,29 +75,6 @@ CMD_BRIEF: str = "brief"
 CMD_CLEAR: str = "clear"
 CMD_KILL: str = "kill"
 CMD_REVIVE: str = "revive"
-
-# ----------------------------------------------------------------------------
-# Academic calendar
-# ----------------------------------------------------------------------------
-# SEMESTER_START_DATE must be the Monday of YOUR semester's week 1. All /week
-# queries compute the current academic week as (today - SEMESTER_START_DATE) // 7.
-# Update the literal below when a new semester starts.
-SEMESTER_START_DATE: date = date(2026, 1, 12)
-
-
-def get_current_week() -> int:
-    """Return today's academic week number (1-based).
-
-    Returns ``0`` if today is before ``SEMESTER_START_DATE`` so callers can
-    distinguish "pre-semester" from "week 1". No upper bound is enforced —
-    week numbers will grow past 13 into the inter-semester break, which is
-    fine because no queries depend on an upper cap.
-    """
-    days_elapsed = (date.today() - SEMESTER_START_DATE).days
-    if days_elapsed < 0:
-        return 0
-    return (days_elapsed // 7) + 1
-
 
 # ----------------------------------------------------------------------------
 # Scheduler

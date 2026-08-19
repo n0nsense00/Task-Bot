@@ -10,12 +10,11 @@ Conversation state machine::
           │                  └→ EDIT_MODULE_TEXT (text, "Other…")    → save → END
           ├─ editf:due:N     → EDIT_DUE         (calendar callback)  → save → END
           ├─ editf:time:N    → EDIT_TIME        (time-picker cb)     → save → END
-          ├─ editf:week:N    → EDIT_WEEK        (text)               → save → END
           ├─ editf:notes:N   → EDIT_NOTES       (text)               → save → END
           └─ editcancel:N    → END
 
-Module/Due/Time use the same inline pickers as /add. Title / Type / Week /
-Notes use the same text+keyboard input as before.
+Module/Due/Time use the same inline pickers as /add. Title, Type, and Notes
+use the same text+keyboard input as before.
 
 Target task id is stashed in ``context.user_data`` so subsequent state
 handlers know which row to mutate. Cleared on END / /cancel.
@@ -59,12 +58,10 @@ from utils.format import (
     build_edit_type_keyboard,
     build_module_keyboard,
     build_notes_keyboard,
-    build_week_keyboard,
     esc,
     format_task_card,
     module_prefix,
     parse_notes_callback,
-    parse_week_callback,
 )
 from utils.timepicker import (
     build_hour_keyboard,
@@ -83,7 +80,6 @@ EDIT_MODULE = 203
 EDIT_MODULE_TEXT = 204
 EDIT_DUE = 205
 EDIT_TIME = 206
-EDIT_WEEK = 207
 EDIT_NOTES = 208
 
 _CLEAR_KEYWORD: str = "clear"
@@ -107,12 +103,15 @@ def _save_and_summarize(task: Task) -> str:
     return "✅ <b>Updated</b>\n\n" + format_task_card(task)
 
 
-def _load_task(context: ContextTypes.DEFAULT_TYPE) -> Task | None:
+def _load_task(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> Task | None:
     """Helper used by every state handler — fetch the in-progress task or None."""
     task_id = _draft_task_id(context)
-    if task_id is None:
+    chat = update.effective_chat
+    if task_id is None or chat is None:
         return None
-    return get_task(task_id)
+    return get_task(task_id, chat.id)
 
 
 def _abort(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -126,7 +125,8 @@ def _abort(context: ContextTypes.DEFAULT_TYPE) -> int:
 async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Entry: parse 'edit:N' callback, store id, show field picker."""
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return ConversationHandler.END
     await query.answer()
 
@@ -140,7 +140,7 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.edit_message_text("Invalid task id.")
         return ConversationHandler.END
 
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text(f"Task #{task_id} not found.")
         return ConversationHandler.END
@@ -166,7 +166,8 @@ async def edit_field_picked(
 ) -> int:
     """EDIT_PICK_FIELD: receive 'editf:<field>:N', prompt for new value."""
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return EDIT_PICK_FIELD
     await query.answer()
 
@@ -182,7 +183,7 @@ async def edit_field_picked(
         return _abort(context)
 
     context.user_data[_USER_DATA_TASK_ID] = task_id
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text(f"Task #{task_id} no longer exists.")
         return _abort(context)
@@ -219,7 +220,7 @@ async def edit_field_picked(
             body,
             parse_mode=ParseMode.HTML,
             reply_markup=build_module_keyboard(
-                modules, include_skip=False, include_clear=True
+                modules, include_skip=False, include_clear=False
             ),
         )
         return EDIT_MODULE
@@ -241,14 +242,6 @@ async def edit_field_picked(
             reply_markup=build_time_preset_keyboard(),
         )
         return EDIT_TIME
-
-    if field == "week":
-        await query.edit_message_text(
-            header + "\nPick the new week number:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_week_keyboard(include_clear=True),
-        )
-        return EDIT_WEEK
 
     if field == "notes":
         await query.edit_message_text(
@@ -276,7 +269,7 @@ async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return EDIT_TITLE
 
-    task = _load_task(context)
+    task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -290,7 +283,8 @@ async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """EDIT_TYPE: receive type selection from inline keyboard."""
     query = update.callback_query
-    if query is None or query.data is None:
+    chat = update.effective_chat
+    if query is None or query.data is None or chat is None:
         return EDIT_TYPE
     await query.answer()
 
@@ -308,7 +302,7 @@ async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.edit_message_text("Invalid task id. Edit cancelled.")
         return _abort(context)
 
-    task = get_task(task_id)
+    task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -344,7 +338,7 @@ async def edit_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return EDIT_MODULE_TEXT
 
-    task = _load_task(context)
+    task = _load_task(update, context)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -378,7 +372,7 @@ async def edit_module_text(
         )
         return EDIT_MODULE_TEXT
 
-    task = _load_task(context)
+    task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -425,7 +419,7 @@ async def edit_due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         return EDIT_DUE
 
-    task = _load_task(context)
+    task = _load_task(update, context)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -453,7 +447,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return _abort(context)
 
     if action == "skip":
-        task = _load_task(context)
+        task = _load_task(update, context)
         if task is None:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
@@ -496,7 +490,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await query.answer("Invalid time", show_alert=True)
             return EDIT_TIME
         time_str = f"{hour:02d}:{minute:02d}"
-        task = _load_task(context)
+        task = _load_task(update, context)
         if task is None:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
@@ -515,39 +509,6 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 @authorized_only
 @safe
-async def edit_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """EDIT_WEEK: receive week-picker callback (1-13 / Clear / Cancel)."""
-    query = update.callback_query
-    if query is None or query.data is None:
-        return EDIT_WEEK
-    await query.answer()
-
-    action, payload = parse_week_callback(query.data)
-
-    if action == "cancel":
-        await query.edit_message_text("Edit cancelled. No changes made.")
-        return _abort(context)
-
-    task = _load_task(context)
-    if task is None:
-        await query.edit_message_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
-
-    if action == "clear":
-        task.week_number = None
-    elif action == "set" and payload is not None and 1 <= payload <= 13:
-        task.week_number = payload
-    else:
-        return EDIT_WEEK
-
-    await query.edit_message_text(
-        _save_and_summarize(task), parse_mode=ParseMode.HTML
-    )
-    return _abort(context)
-
-
-@authorized_only
-@safe
 async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """EDIT_NOTES (text path): user typed new notes, save."""
     message = update.effective_message
@@ -555,7 +516,7 @@ async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return EDIT_NOTES
     raw = message.text.strip()
 
-    task = _load_task(context)
+    task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
@@ -583,7 +544,7 @@ async def edit_notes_callback(
         await query.edit_message_text("Edit cancelled. No changes made.")
         return _abort(context)
     if action in ("clear", "skip"):
-        task = _load_task(context)
+        task = _load_task(update, context)
         if task is None:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
@@ -664,9 +625,6 @@ def build_edit_conversation() -> ConversationHandler:
             EDIT_TIME: [
                 CallbackQueryHandler(edit_time, pattern=r"^time:"),
                 CallbackQueryHandler(edit_time, pattern=r"^timehr:"),
-            ],
-            EDIT_WEEK: [
-                CallbackQueryHandler(edit_week, pattern=r"^week:"),
             ],
             EDIT_NOTES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_notes),

@@ -1,9 +1,7 @@
 """Basic command handlers: ``/start``, ``/help``, ``/clear``.
 
-``/start`` and ``/help`` produce a sectioned command list with a rotated
-daily tip in the footer. ``/help`` adds a section describing the inline-
-keyboard buttons available on ``/today`` so the user discovers them
-without having to tap around blindly.
+``/start`` and ``/help`` introduce the deadline-focused workflow and explain
+the inline actions available on ``/deadlines``.
 
 ``/clear`` wipes the visible chat history with the bot — both bot-sent
 messages and the user's own commands and replies — by iterating through
@@ -37,21 +35,19 @@ logger = logging.getLogger(__name__)
 def _start_message() -> str:
     """Build the /start welcome message with sectioned command list + tip."""
     sections = [
-        "☀️ <b>Welcome to Task-Bot</b>",
-        "<i>Your personal university tasks tracker.</i>",
+        "🎓 <b>Semester Deadline Tracker</b>",
+        "<i>Keep every assessed deadline in one chronological view.</i>",
         "",
         DIVIDER,
         "",
-        "<b>📅 View</b>",
-        "• /today — tasks due today",
-        "• /week — this week's lectures + next week's tutorials",
-        "• /semester — midterms &amp; finals",
+        "<b>📅 Your dashboard</b>",
+        "• /deadlines — all upcoming deadlines, sorted by urgency",
         "",
-        "<b>✏️ Manage</b>",
-        "• /add — create a new task (interactive)",
-        "• /done &lt;id&gt; — mark a task complete",
-        "• /delete &lt;id&gt; — delete a task",
-        "• /brief — today's morning summary on demand",
+        "<b>✏️ Add &amp; manage</b>",
+        "• /add — add a quiz, lab, assignment, project, midterm, or final",
+        "• /done &lt;id&gt; — mark a deadline complete",
+        "• /delete &lt;id&gt; — delete a deadline",
+        "• /brief — preview deadlines due soon",
         "",
         DIVIDER,
         "",
@@ -63,31 +59,30 @@ def _start_message() -> str:
 def _help_message() -> str:
     """Build the /help reference message — more detail than /start."""
     sections = [
-        "📖 <b>Task-Bot Commands</b>",
+        "📖 <b>Deadline Tracker Commands</b>",
         "",
         DIVIDER,
         "",
         "<b>📅 View</b>",
-        "• /today — tasks due today, with quick-action buttons",
-        "• /week — this week's lectures + next week's tutorials",
-        "• /semester — upcoming midterms and finals (auto-cleans past ones)",
+        "• /deadlines — pending assessed items grouped into Due Today, "
+        "Next 7 Days, and Later",
         "",
         "<b>✏️ Manage</b>",
-        "• /add — create a task (tap-driven: type → module → date → time → week)",
-        "• /done &lt;id&gt; — mark a task done; e.g. <code>/done 24</code>",
-        "• /delete &lt;id&gt; — delete a task (asks confirmation); "
+        "• /add — guided flow: type → module → title → date → time → notes",
+        "• /done &lt;id&gt; — complete a deadline; e.g. <code>/done 24</code>",
+        "• /delete &lt;id&gt; — delete a deadline (asks confirmation); "
         "e.g. <code>/delete 24</code>",
         "• /cancel — abort an /add or /edit flow",
-        "• /brief — send today's morning summary now",
+        "• /brief — preview today's and near-term deadlines",
         "",
         "<b>🧹 Maintenance</b>",
         "• /clear — wipe this chat (your messages + bot replies, last 48h)",
         "",
         "<b>🎮 Inline Buttons</b>",
-        "On /today, tap:",
-        "• ✅ to mark a task complete",
-        "• 📝 to edit any field (pickers for module, date, time, week)",
-        "• 🗑️ to delete (with confirmation)",
+        "On /deadlines, tap ⚙️ Manage deadlines, choose an item, then:",
+        "• ✅ Complete",
+        "• 📝 Edit",
+        "• 🗑️ Delete (with confirmation)",
         "",
         DIVIDER,
         "",
@@ -101,8 +96,16 @@ def _help_message() -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ``/start``: greet the owner with a sectioned command list."""
     message = update.effective_message
-    if message is None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if message is None or chat is None:
         return
+    logger.info(
+        "/start received: chat_id=%s chat_type=%s user_id=%s",
+        chat.id,
+        chat.type,
+        getattr(user, "id", None),
+    )
     await message.reply_text(_start_message(), parse_mode=ParseMode.HTML)
 
 

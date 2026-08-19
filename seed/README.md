@@ -31,7 +31,7 @@ From the project root, with the venv active:
 # Append rows on top of the current DB.
 python seed/seed_tasks.py
 
-# Delete all existing tasks first, then import. Prompts for y/n.
+# Delete the owner's existing personal tasks first, then import. Prompts for y/n.
 python seed/seed_tasks.py --replace
 
 # Import a different CSV file.
@@ -57,8 +57,8 @@ Rules:
 | Column | Required | Format |
 | --- | --- | --- |
 | `title` | yes | any non-empty string |
-| `task_type` | yes | `lecture`, `tutorial`, `assignment`, `midterm`, `final`, or `personal` |
-| `module_code` | mostly | required unless `task_type` is `personal` |
+| `task_type` | yes | `quiz`, `lab`, `assignment`, `project`, `midterm`, `final`, or `other` |
+| `module_code` | yes | a module code from your semester |
 | `due_date` | yes | `YYYY-MM-DD` |
 | `due_time` | no | blank, or `HH:MM` 24-hour time |
 | `week_number` | no | blank, or integer 1-13 |
@@ -68,11 +68,14 @@ Lines starting with `#` are comments and skipped. Blank lines are skipped.
 Titles containing commas must be quoted, for example:
 
 ```csv
-"CS2040, Lecture 1",lecture,CS2040,2026-01-13,09:00,1,Intro
+"SC2001, Quiz 1",quiz,SC2001,2026-09-03,09:00,,Covers weeks 1-3
 ```
 
 Every row is validated before anything is written. If one row fails, the
 script prints the source line number and exits without partial inserts.
+Imported rows belong to the personal chat configured by `MY_TELEGRAM_ID`.
+Group deadlines are created through `/add` inside the group and are unaffected
+by `--replace`.
 
 ## Module Usage
 

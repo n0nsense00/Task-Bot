@@ -1,17 +1,16 @@
 # Task-Bot seed data - reference template.
 # Lines starting with '#' are ignored. Blank lines are ignored.
 # Columns (exact order): title, task_type, module_code, due_date, due_time, week_number, notes
-# task_type must be one of: lecture, tutorial, assignment, midterm, final, personal
-# module_code is required EXCEPT for 'personal' tasks (leave blank for those).
+# task_type must be one of: quiz, lab, assignment, project, midterm, final, other
+# module_code is required.
 # due_time is blank or HH:MM in 24-hour time.
 # week_number is blank or an integer 1-13.
 # due_date must be YYYY-MM-DD.
 title,task_type,module_code,due_date,due_time,week_number,notes
-CS2040 Lecture Week 1,lecture,CS2040,2026-01-13,09:00,1,Intro to data structures
-CS2040 Tutorial 1,tutorial,CS2040,2026-01-20,14:30,2,Problem set 1 due before class
-CS2040 Assignment 1,assignment,CS2040,2026-02-13,23:59,5,Submit before midnight
-CS2040 Midterm,midterm,CS2040,2026-03-05,18:30,7,Covers weeks 1-6; venue LT27
-MH2100 Lecture Week 1,lecture,MH2100,2026-01-14,10:30,1,
-MH2100 Tutorial 3,tutorial,MH2100,2026-02-11,12:30,4,Linear independence exercises
-CS2030 Final,final,CS2030,2026-05-08,09:00,,Central venue TBA
-Buy stationery,personal,,2026-01-12,,,Notebook and highlighters
+SC2001 Lab Quiz 1,quiz,SC2001,2026-09-03,09:00,,Covers weeks 1-3
+SC2005 Lab 1,lab,SC2005,2026-09-10,23:59,,Submit source code and report
+SC2002 Assignment 1,assignment,SC2002,2026-09-18,23:59,,Upload to course portal
+MH2500 Group Project,project,MH2500,2026-10-09,17:00,,Final report submission
+MH2100 Midterm,midterm,MH2100,2026-10-15,18:30,,Venue TBA
+SC2001 Final,final,SC2001,2026-11-23,13:00,,Exam runs from 13:00 to 15:00
+CL0103 Reflection,other,CL0103,2026-11-06,23:59,,Individual reflection

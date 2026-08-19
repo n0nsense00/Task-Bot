@@ -1,8 +1,7 @@
 """Authorization decorators for Task-Bot.
 
 Access model:
-- The bot owner (``MY_TELEGRAM_ID``) can use the bot **anywhere** — including
-  in private DMs with it — for personal use.
+- The bot owner can use it in their private bot chat and the configured group.
 - Any other user can only use the bot inside the allowed group chat
   (``ALLOWED_CHAT_ID``). DMs, other groups, channels — all silently dropped.
 - The kill switch (``utils.kill_switch``) silences non-owner users only;
@@ -11,10 +10,10 @@ Access model:
 Two decorators:
 
 - ``authorized_only``: the default gate. Lets through (a) any message from
-  the allowed group, OR (b) any message from the owner anywhere. Honors the
+  the allowed group, OR (b) the owner's private bot chat. Honors the
   kill switch for non-owners.
-- ``admin_only``: stricter gate for destructive commands. Owner only,
-  anywhere. Bypasses the kill switch by design.
+- ``admin_only``: stricter gate for destructive commands. Owner only, and
+  only in the owner's private bot chat or configured group.
 """
 from __future__ import annotations
 
@@ -34,19 +33,17 @@ HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
 
 
 def authorized_only(func: HandlerFunc) -> HandlerFunc:
-    """Restrict a handler to the allowed group chat OR the owner anywhere.
+    """Restrict a handler to the owner's DM or the one allowed group.
 
     Wraps an async PTB handler. The update passes if either:
-    (a) it comes from the owner (``MY_TELEGRAM_ID``) — they can use the bot
-        in DMs, in the group, anywhere; or
+    (a) it comes from the owner's private bot chat; or
     (b) it comes from the allowed group chat (``ALLOWED_CHAT_ID``).
 
     Updates failing both checks are logged at WARNING (with chat/user ids
     so a fresh deployment can discover the group id from logs) and dropped.
 
     The kill switch (see :mod:`utils.kill_switch`) silences non-owner users
-    only — the owner always gets through, so they can ``/revive`` from
-    anywhere. ``admin_only`` is the stricter gate for destructive commands.
+    only. The owner can still use ``/revive`` from their DM or allowed group.
     """
 
     @wraps(func)
@@ -54,8 +51,11 @@ def authorized_only(func: HandlerFunc) -> HandlerFunc:
         chat = update.effective_chat
         user = update.effective_user
         is_owner = user is not None and user.id == MY_TELEGRAM_ID
+        is_owner_private_chat = (
+            is_owner and chat is not None and chat.id == MY_TELEGRAM_ID
+        )
         in_allowed_chat = chat is not None and chat.id == ALLOWED_CHAT_ID
-        if not (is_owner or in_allowed_chat):
+        if not (is_owner_private_chat or in_allowed_chat):
             logger.warning(
                 "Unauthorized: chat_id=%s chat_type=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
@@ -77,11 +77,10 @@ def authorized_only(func: HandlerFunc) -> HandlerFunc:
 
 
 def admin_only(func: HandlerFunc) -> HandlerFunc:
-    """Restrict a handler to the bot owner, anywhere.
+    """Restrict a handler to the owner in their DM or allowed group.
 
-    The update must come from ``MY_TELEGRAM_ID``. Chat location doesn't
-    matter — the owner can run admin commands in the group, in their DM
-    with the bot, or anywhere else they have access. Use for destructive
+    The update must come from ``MY_TELEGRAM_ID`` and from either the owner's
+    private bot chat or the configured group. Use for destructive
     commands that even trusted group members shouldn't invoke (e.g.
     ``/clear``, ``/kill``, ``/revive``). Bypasses the kill switch by
     design so the owner always retains control. Failures are logged at
@@ -92,7 +91,12 @@ def admin_only(func: HandlerFunc) -> HandlerFunc:
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
         chat = update.effective_chat
         user = update.effective_user
-        if user is None or user.id != MY_TELEGRAM_ID:
+        is_owner = user is not None and user.id == MY_TELEGRAM_ID
+        in_supported_chat = chat is not None and chat.id in (
+            MY_TELEGRAM_ID,
+            ALLOWED_CHAT_ID,
+        )
+        if not (is_owner and in_supported_chat):
             logger.warning(
                 "Admin-only refused: chat_id=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
