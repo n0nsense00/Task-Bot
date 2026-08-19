@@ -154,9 +154,16 @@ def format_relative_date(target: date) -> str:
     return target.strftime("%a %d %b")
 
 
-def days_away_label(target: date) -> str:
-    """Return concise phrasing such as 'N days away' or 'N days ago'."""
-    delta = (target - date.today()).days
+def days_away_label(target: date, today: date) -> str:
+    """Return concise phrasing such as 'N days away' or 'N days ago'.
+
+    ``today`` is supplied by the caller for the same reason as
+    :func:`urgency_emoji`: reading :func:`date.today` here returns the UTC
+    day, which is a day behind the local one for most of the evening in
+    Asia/Singapore. Callers pass :func:`utils.clock.today_local` so the label
+    agrees with whatever date basis they used to select and group the tasks.
+    """
+    delta = (target - today).days
     if delta == 0:
         return "today"
     if delta == 1:
