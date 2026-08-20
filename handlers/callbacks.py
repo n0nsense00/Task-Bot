@@ -21,12 +21,19 @@ disambiguated by colon count — see :func:`delete_request_callback` and
 from __future__ import annotations
 
 import logging
+
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from database.db import delete_task, get_task, mark_complete
-from handlers.tasks import render_deadline_picker, render_deadlines
+from handlers.tasks import (
+    is_tracked_deadline_dashboard,
+    refresh_deadline_dashboard,
+    render_deadline_picker,
+    render_deadlines,
+)
 from utils.auth import authorized_only
 from utils.errors import safe
 from utils.format import (
@@ -163,15 +170,29 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     mark_complete(task_id, chat.id)
     await query.answer(f"Marked done: {task.title}")
 
+    message_id = query.message.message_id if query.message is not None else None
+    if message_id is not None and is_tracked_deadline_dashboard(
+        chat.id, message_id
+    ):
+        # This message IS the persistent dashboard. One edit through the
+        # central path keeps it current — editing here too would be a
+        # redundant second write of identical content.
+        await refresh_deadline_dashboard(context.application, chat.id)
+        return
+
+    # An older, untracked dashboard: keep its familiar in-place behaviour,
+    # then bring the live dashboard up to date separately.
     text, keyboard = render_deadlines(chat.id)
     try:
         await query.edit_message_text(
             text, parse_mode=ParseMode.HTML, reply_markup=keyboard
         )
-    except Exception:
-        # Editing fails for messages older than 48h, or if the message has
-        # since been deleted. Don't crash — the toast already confirmed.
-        logger.exception("Failed to refresh /deadlines after Done tap")
+    except TelegramError as exc:
+        # The message may have been deleted. Bot-owned messages stay editable
+        # well beyond 48h — that limit applies to /clear deletion, not edits.
+        # The toast already confirmed the completion either way.
+        logger.warning("Could not update the tapped message: %s", exc)
+    await refresh_deadline_dashboard(context.application, chat.id)
 
 
 @authorized_only
@@ -248,6 +269,16 @@ async def delete_confirm_callback(
 
     if action == "no":
         await query.answer("Cancelled")
+        message_id = (
+            query.message.message_id if query.message is not None else None
+        )
+        if message_id is not None and is_tracked_deadline_dashboard(
+            chat.id, message_id
+        ):
+            # Never leave the persistent dashboard sitting as a cancellation
+            # card — restore it to the live list.
+            await refresh_deadline_dashboard(context.application, chat.id)
+            return
         await query.edit_message_text("Cancelled. No tasks were deleted.")
         return
 
@@ -264,7 +295,18 @@ async def delete_confirm_callback(
 
     delete_task(task_id, chat.id)
     await query.answer(f"Deleted: {task.title}")
+
+    message_id = query.message.message_id if query.message is not None else None
+    if message_id is not None and is_tracked_deadline_dashboard(
+        chat.id, message_id
+    ):
+        # The confirmation replaced the dashboard in place; put the refreshed
+        # dashboard back rather than stranding it as a "Deleted" card.
+        await refresh_deadline_dashboard(context.application, chat.id)
+        return
+
     await query.edit_message_text(
         "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),
         parse_mode=ParseMode.HTML,
     )
+    await refresh_deadline_dashboard(context.application, chat.id)

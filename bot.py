@@ -62,6 +62,7 @@ from handlers.edit_task import build_edit_conversation
 from handlers.errors import error_handler, unknown_command
 from handlers.tasks import (
     deadlines,
+    refresh_all_deadline_dashboards,
     delete_task_cmd,
     done_task_cmd,
 )
@@ -148,6 +149,16 @@ async def _post_init(application: Application) -> None:
         logger.info(
             "Scheduler started — next morning brief at %s", job.next_run_time
         )
+    refresh_job = scheduler.get_job("deadline_dashboard_refresh")
+    if refresh_job is not None:
+        logger.info(
+            "Next deadline-dashboard refresh at %s", refresh_job.next_run_time
+        )
+
+    # Catch up any dashboard whose countdown went stale while the bot was
+    # down. Silent no-op when nothing is registered; never sends a new
+    # message, so a restart cannot surprise a chat with an unprompted post.
+    await refresh_all_deadline_dashboards(application)
 
     await catch_up_missed_brief(application)
 

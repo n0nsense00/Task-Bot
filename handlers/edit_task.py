@@ -37,6 +37,10 @@ from telegram.ext import (
 
 from config import CMD_CANCEL
 from database.db import get_modules, get_task, update_task
+from handlers.tasks import (
+    is_tracked_deadline_dashboard,
+    refresh_deadline_dashboard,
+)
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
 from utils.calendar_widget import (
@@ -96,9 +100,13 @@ def _draft_task_id(context: ContextTypes.DEFAULT_TYPE) -> int | None:
         return None
 
 
-def _save_and_summarize(task: Task) -> str:
-    """Persist ``task`` and build the post-update HTML success message."""
-    update_task(task)
+def _updated_summary(task: Task) -> str:
+    """Build the post-update HTML success card.
+
+    Persistence deliberately lives in the ``_finish_edit_*`` helpers below, so
+    every save path also refreshes the dashboard and no branch can silently
+    skip it.
+    """
     return "✅ <b>Updated</b>\n\n" + format_task_card(task)
 
 
@@ -117,6 +125,66 @@ def _abort(context: ContextTypes.DEFAULT_TYPE) -> int:
     """Drop user_data and end the conversation. Used by error paths."""
     context.user_data.pop(_USER_DATA_TASK_ID, None)
     return ConversationHandler.END
+
+
+async def _finish_edit_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, task: Task
+) -> int:
+    """Complete a text-input edit: persist, reply, refresh, end.
+
+    The Updated card stays a separate reply because the user typed into the
+    chat; the persistent dashboard is refreshed alongside it.
+    """
+    update_task(task)
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(
+            _updated_summary(task), parse_mode=ParseMode.HTML
+        )
+    chat = update.effective_chat
+    if chat is not None:
+        await refresh_deadline_dashboard(context.application, chat.id)
+    return _abort(context)
+
+
+async def _finish_edit_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, task: Task
+) -> int:
+    """Complete a button-driven edit: persist, then restore or card, end.
+
+    When the edited message IS the persistent dashboard it is returned to the
+    live list rather than left showing an Updated card. Otherwise the Updated
+    card is kept (the user is looking at a historical message) and the tracked
+    dashboard is refreshed separately.
+
+    Callers have already answered the callback query, so no toast is raised
+    here — answering the same query twice is an error.
+    """
+    update_task(task)
+    query = update.callback_query
+    chat = update.effective_chat
+    chat_id = chat.id if chat is not None else None
+    message_id = (
+        query.message.message_id
+        if query is not None and query.message is not None
+        else None
+    )
+
+    if (
+        chat_id is not None
+        and message_id is not None
+        and is_tracked_deadline_dashboard(chat_id, message_id)
+    ):
+        await refresh_deadline_dashboard(context.application, chat_id)
+        return _abort(context)
+
+    if query is not None:
+        await query.edit_message_text(
+            _updated_summary(task), parse_mode=ParseMode.HTML
+        )
+    if chat_id is not None:
+        await refresh_deadline_dashboard(context.application, chat_id)
+    return _abort(context)
 
 
 @authorized_only
@@ -273,8 +341,7 @@ async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
     task.title = new_title
-    await message.reply_text(_save_and_summarize(task), parse_mode=ParseMode.HTML)
-    return _abort(context)
+    return await _finish_edit_text(update, context, task)
 
 
 @authorized_only
@@ -306,10 +373,7 @@ async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
     task.task_type = new_type
-    await query.edit_message_text(
-        _save_and_summarize(task), parse_mode=ParseMode.HTML
-    )
-    return _abort(context)
+    return await _finish_edit_callback(update, context, task)
 
 
 @authorized_only
@@ -349,10 +413,7 @@ async def edit_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     else:
         return EDIT_MODULE
 
-    await query.edit_message_text(
-        _save_and_summarize(task), parse_mode=ParseMode.HTML
-    )
-    return _abort(context)
+    return await _finish_edit_callback(update, context, task)
 
 
 @authorized_only
@@ -376,8 +437,7 @@ async def edit_module_text(
         await message.reply_text("Task no longer exists. Edit cancelled.")
         return _abort(context)
     task.module_code = code
-    await message.reply_text(_save_and_summarize(task), parse_mode=ParseMode.HTML)
-    return _abort(context)
+    return await _finish_edit_text(update, context, task)
 
 
 @authorized_only
@@ -424,10 +484,7 @@ async def edit_due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return _abort(context)
     task.due_date = selected
     await query.answer()
-    await query.edit_message_text(
-        _save_and_summarize(task), parse_mode=ParseMode.HTML
-    )
-    return _abort(context)
+    return await _finish_edit_callback(update, context, task)
 
 
 @authorized_only
@@ -454,10 +511,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return _abort(context)
         task.due_time = None
         await query.answer()
-        await query.edit_message_text(
-            _save_and_summarize(task), parse_mode=ParseMode.HTML
-        )
-        return _abort(context)
+        return await _finish_edit_callback(update, context, task)
 
     if action == "custom":
         await query.answer()
@@ -497,10 +551,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return _abort(context)
         task.due_time = time_str
         await query.answer()
-        await query.edit_message_text(
-            _save_and_summarize(task), parse_mode=ParseMode.HTML
-        )
-        return _abort(context)
+        return await _finish_edit_callback(update, context, task)
 
     await query.answer()
     return EDIT_TIME
@@ -523,8 +574,7 @@ async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     task.notes = (
         None if raw.lower() == _CLEAR_KEYWORD or not raw else raw
     )
-    await message.reply_text(_save_and_summarize(task), parse_mode=ParseMode.HTML)
-    return _abort(context)
+    return await _finish_edit_text(update, context, task)
 
 
 @authorized_only
@@ -550,10 +600,7 @@ async def edit_notes_callback(
             )
             return _abort(context)
         task.notes = None
-        await query.edit_message_text(
-            _save_and_summarize(task), parse_mode=ParseMode.HTML
-        )
-        return _abort(context)
+        return await _finish_edit_callback(update, context, task)
     return EDIT_NOTES
 
 

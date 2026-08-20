@@ -15,6 +15,7 @@ the repo easy to run and review.
 - Track quizzes, labs, assignments, projects, midterms, finals, and other items.
 - Store module codes, titles, due dates, optional due times, and notes.
 - View every pending deadline in one chronological list, soonest first.
+- Keep one live dashboard per chat that updates itself as the date rolls over.
 - Complete, edit, or delete deadlines from Telegram inline buttons.
 - Automatically keep personal-chat and group-chat deadlines separate.
 - Serve a shared study group while restricting the bot to one configured chat.
@@ -42,7 +43,7 @@ bot.py
     |
     +-- handlers/       Slash commands, callbacks, add/edit flows, admin, errors
     +-- database/       SQLite schema, CRUD helpers, query helpers
-    +-- scheduler.py    Morning brief, catch-up logic, and heartbeat
+    +-- scheduler.py    Morning brief, dashboard refresh, catch-up, heartbeat
     +-- seed/           CSV import scripts for tasks and modules
     +-- utils/          Auth, kill switch, message tracking, formatting, pickers
     +-- deploy/         systemd unit for the EC2 host
@@ -74,13 +75,52 @@ State is a flag file at `data/killed.flag`, so it survives process restarts.
 lock the owner out with no way to issue `/revive`. Neither command appears in
 the Telegram `/` suggestion menu.
 
+### Persistent Dashboard
+
+`/deadlines` does not post a new list each time. The first call in a chat sends
+the dashboard and records its message id in SQLite; from then on that one
+message *is* the dashboard, and everything else edits it in place.
+
+It refreshes on three triggers:
+
+| Trigger | What happens |
+| --- | --- |
+| Just after local midnight (00:06 in `TIMEZONE`) | Countdowns roll over — `34 days away` becomes `33 days away`, and deadlines that have passed drop off |
+| Any add, complete, edit, or delete | The dashboard updates immediately |
+| Bot startup | Catches up a dashboard that went stale while the process was down |
+
+The midnight job runs regardless of `MORNING_BRIEF_ENABLED` — that flag governs
+only the morning push. `TIMEZONE` now drives both.
+
+Deadlines that fall into the past are **not deleted**. They stay in SQLite and
+simply stop being rendered once the local date moves past them.
+
+Registrations are per `chat_id`, so the owner's private chat and the group each
+keep their own independent dashboard. The id is persisted, so it survives a
+`systemctl restart`.
+
+Two things worth knowing:
+
+- **The first `/deadlines` after deploying this feature creates the tracked
+  dashboard.** A dashboard posted *before* it cannot be adopted, because
+  Telegram gives bots no way to read arbitrary chat history — so expect one
+  replacement message, after which the same message is reused indefinitely.
+- **Re-running `/deadlines` refreshes the existing dashboard** and replies with
+  a short confirmation rather than a second full list. If the tracked message
+  has been deleted, the stale record is dropped and a replacement is sent.
+
+Bot-owned messages stay editable indefinitely; the 48-hour Telegram limit
+applies to `/clear` *deletion*, not to edits. If `/clear` does delete the
+dashboard, its registration is dropped and the next `/deadlines` registers a
+new one.
+
 ## Commands
 
 | Command | Access | Purpose |
 | --- | --- | --- |
 | `/start` | All | Show the welcome message |
 | `/help` | All | Show command reference |
-| `/deadlines` | All | Every pending deadline in one list, soonest first |
+| `/deadlines` | All | Create or refresh this chat's persistent deadline dashboard |
 | `/add` | All | Add a deadline through an interactive flow |
 | `/done <id>` | All | Mark a deadline complete |
 | `/delete <id>` | All | Delete a deadline after confirmation |
@@ -151,7 +191,7 @@ Three files live under `data/`, which is gitignored in full:
 
 | File | Written by | Purpose |
 | --- | --- | --- |
-| `tasks.db` | [database/db.py](database/db.py) | All deadlines and modules |
+| `tasks.db` | [database/db.py](database/db.py) | Deadlines, modules, and dashboard registrations |
 | `last_brief.txt` | [scheduler.py](scheduler.py) | Date of the last morning brief, so restarts don't re-send |
 | `killed.flag` | [utils/kill_switch.py](utils/kill_switch.py) | Presence means the kill switch is engaged |
 
