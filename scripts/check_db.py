@@ -5,12 +5,14 @@ Run from the project root:
     python scripts/check_db.py
 
 The script never touches ``data/tasks.db``. It patches ``database.db.DB_PATH``
-to a temporary file, exercises CRUD/query/module helpers, and exits non-zero if
-an assertion fails.
+to a temporary file, exercises CRUD/query/module/dashboard helpers, and exits
+non-zero if an assertion fails.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -40,6 +42,16 @@ def run_check() -> None:
     with TemporaryDirectory(prefix="taskbot-check-") as tmp_dir:
         db.DB_PATH = Path(tmp_dir) / "tasks.db"
         db.init_db()
+
+        # Fresh database must already carry the dashboard registry table.
+        with closing(sqlite3.connect(db.DB_PATH)) as schema_conn:
+            table_names = {
+                row[0]
+                for row in schema_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        assert "deadline_dashboards" in table_names
 
         db.add_module(Module(code="CS2040", name="Data Structures"))
         db.add_module(Module(code="MH2100", name="Calculus III"))
@@ -134,8 +146,39 @@ def run_check() -> None:
         assert db.delete_task(old_midterm_id, personal_chat_id)
         assert db.count_tasks() == 0
 
+        # Persistent /deadlines dashboards: one tracked message id per chat.
+        assert db.list_deadline_dashboards() == []
+        assert db.get_deadline_dashboard_message_id(personal_chat_id) is None
+
+        db.save_deadline_dashboard(personal_chat_id, 5001)
+        assert db.get_deadline_dashboard_message_id(personal_chat_id) == 5001
+
+        # Re-saving the same chat replaces the id instead of adding a row.
+        db.save_deadline_dashboard(personal_chat_id, 5002)
+        assert db.get_deadline_dashboard_message_id(personal_chat_id) == 5002
+        assert db.list_deadline_dashboards() == [(personal_chat_id, 5002)]
+
+        # A second chat tracks its own dashboard independently.
+        db.save_deadline_dashboard(group_chat_id, 6001)
+        assert db.get_deadline_dashboard_message_id(group_chat_id) == 6001
+        assert db.get_deadline_dashboard_message_id(personal_chat_id) == 5002
+        dashboards = db.list_deadline_dashboards()
+        assert sorted(dashboards) == [
+            (group_chat_id, 6001),
+            (personal_chat_id, 5002),
+        ]
+
+        # Deleting one registration leaves the other intact.
+        assert db.delete_deadline_dashboard(personal_chat_id)
+        assert not db.delete_deadline_dashboard(personal_chat_id)
+        assert db.get_deadline_dashboard_message_id(personal_chat_id) is None
+        assert db.list_deadline_dashboards() == [(group_chat_id, 6001)]
+        assert db.delete_deadline_dashboard(group_chat_id)
+        assert db.list_deadline_dashboards() == []
+
         _print_result("temporary_db", db.DB_PATH)
         _print_result("modules_checked", db.count_modules())
+        _print_result("dashboards_checked", len(dashboards))
         _print_result("status", "ok")
 
 

@@ -1,6 +1,12 @@
 """Daily push notifications via APScheduler.
 
-A single cron job fires every day at ``BRIEF_HOUR:BRIEF_MINUTE`` in
+Two cron jobs run here. The morning brief fires at
+``BRIEF_HOUR:BRIEF_MINUTE`` and is gated on ``MORNING_BRIEF_ENABLED``; the
+deadline-dashboard refresh fires shortly after local midnight and is always
+installed, because a stale countdown is wrong regardless of whether the user
+wants a morning push.
+
+The brief job fires every day at ``BRIEF_HOUR:BRIEF_MINUTE`` in
 :data:`config.TIMEZONE`, builds a "morning brief" (today's tasks plus the
 next few semester deadlines), and sends it to the bot owner.
 
@@ -31,6 +37,7 @@ from config import (
     TIMEZONE,
 )
 from database.db import get_semester_deadlines
+from handlers.tasks import refresh_all_deadline_dashboards
 from database.models import Task
 from utils.clock import today_local
 from utils.format import (
@@ -47,6 +54,13 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent
 _LAST_BRIEF_FILE: Path = _PROJECT_ROOT / "data" / "last_brief.txt"
 
 _JOB_ID: str = "morning_brief"
+# Shortly after local midnight: late enough that the date has definitely
+# rolled over, early enough that a countdown is corrected before anyone reads
+# it. Runs regardless of MORNING_BRIEF_ENABLED — that flag governs only the
+# morning push, not the dashboard.
+_DEADLINE_REFRESH_JOB_ID: str = "deadline_dashboard_refresh"
+_DEADLINE_REFRESH_HOUR: int = 0
+_DEADLINE_REFRESH_MINUTE: int = 6
 _HEARTBEAT_JOB_ID: str = "heartbeat"
 _HEARTBEAT_INTERVAL_MINUTES: int = 10
 _UPCOMING_WINDOW_DAYS: int = 14
@@ -241,6 +255,23 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
             "Morning brief disabled (MORNING_BRIEF_ENABLED=false) — "
             "cron not installed. /brief still works on demand."
         )
+    # Dashboard rollover. Unconditional: a chat with a registered dashboard
+    # must see "34 days away" become "33 days away" even when the morning
+    # brief is switched off.
+    scheduler.add_job(
+        refresh_all_deadline_dashboards,
+        trigger=CronTrigger(
+            hour=_DEADLINE_REFRESH_HOUR,
+            minute=_DEADLINE_REFRESH_MINUTE,
+            timezone=tz,
+        ),
+        args=(application,),
+        id=_DEADLINE_REFRESH_JOB_ID,
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
     scheduler.add_job(
         _log_heartbeat,
         trigger=IntervalTrigger(minutes=_HEARTBEAT_INTERVAL_MINUTES),

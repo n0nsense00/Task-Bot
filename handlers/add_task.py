@@ -38,6 +38,7 @@ from telegram.ext import (
 
 from config import CMD_ADD, CMD_CANCEL
 from database.db import add_task, get_modules
+from handlers.tasks import refresh_deadline_dashboard
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
 from utils.calendar_widget import (
@@ -434,6 +435,10 @@ async def _finalize_add(
         target = update.effective_message
         if target is not None:
             await target.reply_text(summary, parse_mode=ParseMode.HTML)
+    # The row is already committed. refresh_deadline_dashboard logs its own
+    # failures and never raises, so a dashboard problem cannot make a
+    # successful add look like it failed.
+    await refresh_deadline_dashboard(context.application, chat.id)
     return ConversationHandler.END
 
 

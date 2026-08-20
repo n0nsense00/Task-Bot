@@ -19,6 +19,10 @@ from telegram import Message, Update
 from telegram.constants import ChatType, MessageEntityType, ParseMode
 from telegram.ext import ContextTypes
 
+from database.db import (
+    delete_deadline_dashboard,
+    get_deadline_dashboard_message_id,
+)
 from utils.auth import admin_only, authorized_only
 from utils.errors import safe
 from utils.format import DIVIDER, todays_tip
@@ -163,13 +167,26 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     deleted = 0
     failed = 0
+    deleted_ids: set[int] = set()
     for c, m in to_delete:
         try:
             await context.bot.delete_message(chat_id=c, message_id=m)
             deleted += 1
+            deleted_ids.add(m)
         except Exception:
             # >48h old, already deleted, or otherwise un-deletable.
             failed += 1
+
+    # Only forget the persistent dashboard if it was ACTUALLY removed. A
+    # dashboard Telegram refused to delete (older than 48h) still exists and
+    # stays perfectly editable, so its registration must survive.
+    dashboard_id = get_deadline_dashboard_message_id(chat_id)
+    if dashboard_id is not None and dashboard_id in deleted_ids:
+        delete_deadline_dashboard(chat_id)
+        logger.info(
+            "Dashboard message %s deleted by /clear — registration dropped",
+            dashboard_id,
+        )
 
     # Drop this chat's entries from tracking — succeeded or not, we shouldn't
     # keep retrying these.
