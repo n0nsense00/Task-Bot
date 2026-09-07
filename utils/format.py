@@ -321,7 +321,7 @@ def build_deadline_picker_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "← Back to deadlines", callback_data=CB_MANAGE_DASHBOARD
+                "← Close manager", callback_data=CB_MANAGE_DASHBOARD
             )
         ]
     )
