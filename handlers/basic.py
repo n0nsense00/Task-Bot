@@ -29,7 +29,7 @@ from database.db import (
     list_tracked_messages,
     save_tracked_message,
 )
-from utils.auth import admin_only, authorized_only
+from utils.auth import admin_only, authorized_only, is_supported_chat
 from utils.errors import safe
 from utils.format import DIVIDER, todays_tip
 from utils.tracking_bot import (
@@ -404,6 +404,8 @@ async def track_incoming_message(
     message = update.effective_message
     chat = update.effective_chat
     if message is None or chat is None:
+        return
+    if not is_supported_chat(update):
         return
 
     bot = context.bot
