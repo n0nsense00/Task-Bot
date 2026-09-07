@@ -24,10 +24,16 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from database.db import (  # noqa: E402
     add_module,
     count_modules,
-    delete_all_modules,
     init_db,
+    replace_modules,
 )
 from database.models import Module  # noqa: E402
+from utils.limits import (  # noqa: E402
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    MODULE_NAME_MAX_LENGTH,
+    field_length_error,
+)
 
 EXPECTED_COLUMNS: tuple[str, ...] = ("code", "name")
 DEFAULT_CSV_PATH: Path = _PROJECT_ROOT / "seed" / "seed_modules.csv"
@@ -87,7 +93,21 @@ def _validate_row(raw: _RawRow) -> Module:
     code = (raw.data.get("code") or "").strip()
     if not code:
         raise ValueError("code is required")
+    error = field_length_error(
+        code,
+        label="code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        raise ValueError(error)
     name = (raw.data.get("name") or "").strip() or None
+    if name is not None:
+        error = field_length_error(
+            name, label="name", maximum=MODULE_NAME_MAX_LENGTH
+        )
+        if error:
+            raise ValueError(error)
     return Module(code=code, name=name)
 
 
@@ -148,11 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         if not _confirm_replace(existing):
             print("Aborted. No changes made.")
             return 1
-        deleted = delete_all_modules()
-        print(f"Deleted {deleted} existing module(s).")
-
-    for module in modules:
-        add_module(module)
+        replace_modules(modules)
+        print(f"Replaced {existing} existing module(s) atomically.")
+    else:
+        for module in modules:
+            add_module(module)
 
     print(f"Imported {len(modules)} module(s).")
     return 0

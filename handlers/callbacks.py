@@ -6,10 +6,10 @@ only contains the single-shot Done / Delete-request / Delete-confirm flows
 because they're stateless and don't fit the conversation model.
 
 Callback-data formats handled here:
-    ``manage:N``     — show page N of the compact deadline picker
+    ``manage:N``     — open/page through a transient deadline picker
     ``manageitem:N:P`` — show task #N's actions, returning to page P
-    ``managedash``   — return to the main /deadlines dashboard
-    ``done:N``       — mark task #N complete, re-render /deadlines in place
+    ``managedash``   — close the transient manager
+    ``done:N``       — mark task #N complete and refresh /deadlines
     ``del:N``        — entry point: show Yes/No confirmation in place
     ``del:yes:N``    — confirmed: delete task #N, show "Deleted" card
     ``del:no:N``     — cancelled: show "Cancelled" message
@@ -32,8 +32,8 @@ from handlers.tasks import (
     is_tracked_deadline_dashboard,
     refresh_deadline_dashboard,
     render_deadline_picker,
-    render_deadlines,
 )
+from handlers.transient import show_transient_view
 from utils.auth import authorized_only
 from utils.errors import safe
 from utils.format import (
@@ -49,13 +49,30 @@ from utils.format import (
 
 logger = logging.getLogger(__name__)
 
+_COMPLETED_ANSWER: str = "Deadline completed"
+_DELETED_ANSWER: str = "Deadline deleted"
+
+
+async def _answer_after_mutation(query, text: str) -> None:
+    """Acknowledge a committed mutation without blocking its refresh path."""
+    try:
+        await query.answer(text)
+    except TelegramError as exc:
+        # Callback queries expire quickly. The database change is already
+        # committed, so an expired toast must not prevent the dashboard edit.
+        logger.warning("Could not acknowledge post-mutation callback: %s", exc)
+
 
 @authorized_only
 @safe
 async def manage_deadlines_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle ``manage:N`` by opening the requested deadline-picker page."""
+    """Handle ``manage:N`` without replacing the persistent dashboard.
+
+    A tap on the registered dashboard sends a separate manager message.
+    Pagination taps on that transient message continue editing it in place.
+    """
     query = update.callback_query
     chat = update.effective_chat
     if query is None or query.data is None or chat is None:
@@ -73,8 +90,12 @@ async def manage_deadlines_callback(
 
     await query.answer()
     text, keyboard = render_deadline_picker(chat.id, page)
-    await query.edit_message_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+    await show_transient_view(
+        query,
+        chat.id,
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
     )
 
 
@@ -104,8 +125,12 @@ async def manage_deadline_item_callback(
     if task is None or task.completed:
         await query.answer("That deadline is no longer pending", show_alert=True)
         text, keyboard = render_deadline_picker(chat.id, page)
-        await query.edit_message_text(
-            text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+        await show_transient_view(
+            query,
+            chat.id,
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
         )
         return
 
@@ -115,7 +140,9 @@ async def manage_deadline_item_callback(
         + format_task_card(task)
         + "\n\n<i>Choose an action below.</i>"
     )
-    await query.edit_message_text(
+    await show_transient_view(
+        query,
+        chat.id,
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=build_deadline_action_keyboard(task_id, page),
@@ -127,24 +154,26 @@ async def manage_deadline_item_callback(
 async def manage_dashboard_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle ``managedash`` by returning to the main deadline dashboard."""
+    """Handle ``managedash`` by closing only the transient manager."""
     query = update.callback_query
     chat = update.effective_chat
     if query is None or query.data != CB_MANAGE_DASHBOARD or chat is None:
         return
     await query.answer()
-    text, keyboard = render_deadlines(chat.id)
-    await query.edit_message_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+    await show_transient_view(
+        query,
+        chat.id,
+        "✅ Manager closed. The deadline dashboard is unchanged.",
     )
+
 
 @authorized_only
 @safe
 async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ``done:N``: complete it and refresh /deadlines in place.
 
-    A toast confirmation appears at the top of Telegram via ``query.answer``;
-    the message body is then edited to the refreshed task list.
+    A toast confirms the completion, the transient manager becomes a compact
+    result card, and the separately registered dashboard is refreshed.
     """
     query = update.callback_query
     chat = update.effective_chat
@@ -168,7 +197,7 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     mark_complete(task_id, chat.id)
-    await query.answer(f"Marked done: {task.title}")
+    await _answer_after_mutation(query, _COMPLETED_ANSWER)
 
     message_id = query.message.message_id if query.message is not None else None
     if message_id is not None and is_tracked_deadline_dashboard(
@@ -180,18 +209,18 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await refresh_deadline_dashboard(context.application, chat.id)
         return
 
-    # An older, untracked dashboard: keep its familiar in-place behaviour,
-    # then bring the live dashboard up to date separately.
-    text, keyboard = render_deadlines(chat.id)
+    # Manager and historical messages are not the registered dashboard, so a
+    # compact result card can safely replace the tapped message.
     try:
         await query.edit_message_text(
-            text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+            "✅ <b>Completed</b>\n\n" + format_task_card(task),
+            parse_mode=ParseMode.HTML,
         )
     except TelegramError as exc:
         # The message may have been deleted. Bot-owned messages stay editable
         # well beyond 48h — that limit applies to /clear deletion, not edits.
         # The toast already confirmed the completion either way.
-        logger.warning("Could not update the tapped message: %s", exc)
+        logger.warning("Could not update the transient message: %s", exc)
     await refresh_deadline_dashboard(context.application, chat.id)
 
 
@@ -220,16 +249,20 @@ async def delete_request_callback(
     try:
         task_id = int(parts[1])
     except ValueError:
-        await query.edit_message_text("Invalid task id.")
+        await show_transient_view(query, chat.id, "Invalid task id.")
         return
 
     task = get_task(task_id, chat.id)
     if task is None:
-        await query.edit_message_text(f"Task #{task_id} not found.")
+        await show_transient_view(
+            query, chat.id, f"Task #{task_id} not found."
+        )
         return
 
     confirmation = "🗑️ <b>Delete this task?</b>\n\n" + format_task_card(task)
-    await query.edit_message_text(
+    await show_transient_view(
+        query,
+        chat.id,
         confirmation,
         parse_mode=ParseMode.HTML,
         reply_markup=build_delete_confirmation_keyboard(task_id),
@@ -288,13 +321,13 @@ async def delete_confirm_callback(
     task = get_task(task_id, chat.id)
     if task is None:
         await query.answer("Already deleted")
-        await query.edit_message_text(
-            f"Task #{task_id} was already gone."
+        await show_transient_view(
+            query, chat.id, f"Task #{task_id} was already gone."
         )
         return
 
     delete_task(task_id, chat.id)
-    await query.answer(f"Deleted: {task.title}")
+    await _answer_after_mutation(query, _DELETED_ANSWER)
 
     message_id = query.message.message_id if query.message is not None else None
     if message_id is not None and is_tracked_deadline_dashboard(
@@ -305,8 +338,11 @@ async def delete_confirm_callback(
         await refresh_deadline_dashboard(context.application, chat.id)
         return
 
-    await query.edit_message_text(
-        "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        await query.edit_message_text(
+            "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError as exc:
+        logger.warning("Could not update the deletion confirmation: %s", exc)
     await refresh_deadline_dashboard(context.application, chat.id)

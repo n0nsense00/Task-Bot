@@ -16,13 +16,13 @@ when the user picks "Custom…" (re-renders to the hour picker) or taps an
 hour (re-renders to the minute picker for that hour) — only ``set`` / ``skip``
 advance to NOTES.
 
-The in-progress draft lives in ``context.user_data['new_task_draft']`` and
-is cleared on END / /cancel so future conversations start fresh.
+The in-progress draft lives in ``context.user_data['new_task_drafts']``, keyed
+by Telegram chat id, and is cleared on END / /cancel.  This keeps one user's
+personal and group-chat conversations independent.
 """
 from __future__ import annotations
 
 import logging
-from datetime import date as _date
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -41,6 +41,7 @@ from database.db import add_task, get_modules
 from handlers.tasks import refresh_deadline_dashboard
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
+from utils.clock import today_local
 from utils.calendar_widget import (
     build_calendar_keyboard,
     calendar_header_text,
@@ -48,6 +49,13 @@ from utils.calendar_widget import (
     parse_iso_date,
     parse_year_month,
     shortcut_to_date,
+)
+from utils.conversation_state import (
+    begin_chat_flow,
+    clear_chat_value,
+    finish_chat_flow,
+    get_chat_value,
+    set_chat_value,
 )
 from utils.errors import safe
 from utils.format import (
@@ -57,6 +65,13 @@ from utils.format import (
     build_notes_keyboard,
     format_task_card,
     parse_notes_callback,
+)
+from utils.limits import (
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    field_length_error,
 )
 from utils.timepicker import (
     build_hour_keyboard,
@@ -72,16 +87,27 @@ TYPE, MODULE, MODULE_TEXT, TITLE, DATE, TIME, NOTES = range(7)
 
 _SKIP_KEYWORD: str = "skip"
 _ADD_TYPE_CB_PREFIX: str = "addtype"
-_USER_DATA_KEY: str = "new_task_draft"
+_USER_DATA_KEY: str = "new_task_drafts"
+_FLOW_NAME: str = "add"
 
 
-def _draft(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
-    """Return (creating if needed) the in-progress draft dict for this user."""
-    draft = context.user_data.get(_USER_DATA_KEY)
-    if draft is None:
+def _draft(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> dict[str, Any]:
+    """Return (creating if needed) this chat's in-progress draft."""
+    draft = get_chat_value(update, context, _USER_DATA_KEY)
+    if not isinstance(draft, dict):
         draft = {}
-        context.user_data[_USER_DATA_KEY] = draft
+        set_chat_value(update, context, _USER_DATA_KEY, draft)
     return draft
+
+
+def _clear_add_state(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Clear only this chat's add draft and active-flow marker."""
+    clear_chat_value(update, context, _USER_DATA_KEY)
+    finish_chat_flow(update, context, _FLOW_NAME)
 
 
 def _type_keyboard() -> InlineKeyboardMarkup:
@@ -107,11 +133,18 @@ def _type_keyboard() -> InlineKeyboardMarkup:
 @authorized_only
 @safe
 async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Begin /add: clear any stale draft and prompt for task type."""
+    """Begin /add unless an edit is already active in this chat."""
     message = update.effective_message
     if message is None:
         return ConversationHandler.END
-    context.user_data[_USER_DATA_KEY] = {}
+    active = begin_chat_flow(update, context, _FLOW_NAME)
+    if active is not None:
+        await message.reply_text(
+            f"Finish the current /{active} first, or /cancel it before "
+            "starting /add."
+        )
+        return ConversationHandler.END
+    set_chat_value(update, context, _USER_DATA_KEY, {})
     await message.reply_text(
         "📝 <b>New deadline</b>\n\nWhat kind of assessment is it?",
         parse_mode=ParseMode.HTML,
@@ -136,11 +169,11 @@ async def add_task_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         or parts[1] not in TASK_TYPES
     ):
         await query.edit_message_text("Invalid selection. Aborting /add.")
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
     chosen = parts[1]
-    _draft(context)["task_type"] = chosen
+    _draft(update, context)["task_type"] = chosen
 
     modules = get_modules()
     body = (
@@ -182,7 +215,7 @@ async def add_module_picked(
 
     if rest == "cancel":
         await query.edit_message_text("Cancelled. Nothing was added.")
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
     if rest == "skip":
@@ -198,7 +231,7 @@ async def add_module_picked(
 
     if rest.startswith("select:"):
         code = rest[len("select:") :]
-        _draft(context)["module_code"] = code
+        _draft(update, context)["module_code"] = code
         await query.edit_message_text(
             f"Module: <code>{code}</code>\n\n"
             "What's the title? (send the text, or /cancel)",
@@ -224,7 +257,16 @@ async def add_module_text(
             "Module code can't be empty. Try again, or /cancel."
         )
         return MODULE_TEXT
-    _draft(context)["module_code"] = code
+    error = field_length_error(
+        code,
+        label="Module code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
+        return MODULE_TEXT
+    _draft(update, context)["module_code"] = code
     await message.reply_text(
         f"Module: <code>{code}</code>\n\n"
         "What's the title? (send the text, or /cancel)",
@@ -246,9 +288,15 @@ async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Title can't be empty. Try again, or /cancel."
         )
         return TITLE
-    _draft(context)["title"] = title
+    error = field_length_error(
+        title, label="Title", maximum=TITLE_MAX_LENGTH
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
+        return TITLE
+    _draft(update, context)["title"] = title
 
-    today = _date.today()
+    today = today_local()
     await message.reply_text(
         "📅 <b>When is it due?</b>\n\n"
         f"<code>{calendar_header_text()}</code>",
@@ -275,7 +323,7 @@ async def add_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "cancel":
         await query.answer("Cancelled")
         await query.edit_message_text("Cancelled. Nothing was added.")
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
     if action == "nav" and payload is not None:
@@ -297,7 +345,7 @@ async def add_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer()
         return DATE
 
-    _draft(context)["due_date"] = selected
+    _draft(update, context)["due_date"] = selected
     await query.answer()
     await query.edit_message_text(
         f"Due: <b>{selected.isoformat()}</b>\n\n"
@@ -321,11 +369,11 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "cancel":
         await query.answer("Cancelled")
         await query.edit_message_text("Cancelled. Nothing was added.")
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
     if action == "skip":
-        _draft(context)["due_time"] = None
+        _draft(update, context)["due_time"] = None
         await query.answer()
         await query.edit_message_text(
             "Time: <i>all day</i>\n\n"
@@ -365,7 +413,7 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await query.answer("Invalid time", show_alert=True)
             return TIME
         time_str = f"{hour:02d}:{minute:02d}"
-        _draft(context)["due_time"] = time_str
+        _draft(update, context)["due_time"] = time_str
         await query.answer()
         await query.edit_message_text(
             f"Time: <b>{time_str}</b>\n\n"
@@ -391,7 +439,7 @@ async def _finalize_add(
     :func:`add_notes_callback` (Skip-button path) so the save + reply logic
     stays in one place.
     """
-    draft = _draft(context)
+    draft = _draft(update, context)
     required = ("title", "task_type", "module_code", "due_date")
     if any(k not in draft for k in required):
         target = update.effective_message
@@ -399,7 +447,7 @@ async def _finalize_add(
             await target.reply_text(
                 "Draft is missing required fields — aborting. Please /add again."
             )
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
     try:
@@ -423,10 +471,10 @@ async def _finalize_add(
             await target.reply_text(
                 "Couldn't save that task — check the logs. Nothing was stored."
             )
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
 
-    context.user_data.pop(_USER_DATA_KEY, None)
+    _clear_add_state(update, context)
     task.id = new_id
     summary = "✅ <b>Added</b>\n\n" + format_task_card(task)
     if via_query is not None:
@@ -454,7 +502,14 @@ async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if message is None or message.text is None:
         return NOTES
     raw = message.text.strip()
-    _draft(context)["notes"] = (
+    if raw.lower() != _SKIP_KEYWORD:
+        error = field_length_error(
+            raw, label="Notes", maximum=NOTES_MAX_LENGTH
+        )
+        if error:
+            await message.reply_text(f"{error} Try again, or /cancel.")
+            return NOTES
+    _draft(update, context)["notes"] = (
         None if raw.lower() == _SKIP_KEYWORD or not raw else raw
     )
     return await _finalize_add(update, context)
@@ -474,10 +529,10 @@ async def add_notes_callback(
     action = parse_notes_callback(query.data)
     if action == "cancel":
         await query.edit_message_text("Cancelled. Nothing was added.")
-        context.user_data.pop(_USER_DATA_KEY, None)
+        _clear_add_state(update, context)
         return ConversationHandler.END
     if action in ("skip", "clear"):
-        _draft(context)["notes"] = None
+        _draft(update, context)["notes"] = None
         return await _finalize_add(update, context, via_query=query)
     return NOTES
 
@@ -487,7 +542,7 @@ async def add_notes_callback(
 async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Abort /add: drop the in-progress draft, send confirmation reply."""
     message = update.effective_message
-    context.user_data.pop(_USER_DATA_KEY, None)
+    _clear_add_state(update, context)
     if message is not None:
         await message.reply_text("Cancelled. Nothing was added.")
     return ConversationHandler.END

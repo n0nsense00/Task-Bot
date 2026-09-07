@@ -38,13 +38,20 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from database.db import (  # noqa: E402  (sys.path hack above is intentional)
     add_tasks,
     count_tasks,
-    delete_all_tasks,
     get_default_chat_id,
     init_db,
+    replace_tasks,
 )
 from database.models import (  # noqa: E402
     TASK_TYPES,
     Task,
+)
+from utils.limits import (  # noqa: E402
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    field_length_error,
 )
 
 BASE_COLUMNS: tuple[str, ...] = (
@@ -168,6 +175,9 @@ def _validate_row(raw: _RawRow) -> Task:
     title = (data.get("title") or "").strip()
     if not title:
         raise ValueError("title is required")
+    error = field_length_error(title, label="title", maximum=TITLE_MAX_LENGTH)
+    if error:
+        raise ValueError(error)
 
     task_type = (data.get("task_type") or "").strip().lower()
     if task_type not in TASK_TYPES:
@@ -179,6 +189,14 @@ def _validate_row(raw: _RawRow) -> Task:
     module_code = (data.get("module_code") or "").strip() or None
     if module_code is None:
         raise ValueError("module_code is required")
+    error = field_length_error(
+        module_code,
+        label="module_code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        raise ValueError(error)
 
     due_raw = (data.get("due_date") or "").strip()
     if not due_raw:
@@ -211,6 +229,12 @@ def _validate_row(raw: _RawRow) -> Task:
             )
 
     notes = (data.get("notes") or "").strip() or None
+    if notes is not None:
+        error = field_length_error(
+            notes, label="notes", maximum=NOTES_MAX_LENGTH
+        )
+        if error:
+            raise ValueError(error)
 
     return Task(
         title=title,
@@ -295,10 +319,10 @@ def main(argv: list[str] | None = None) -> int:
         if not _confirm_replace(existing):
             print("Aborted. No changes made.")
             return 1
-        deleted = delete_all_tasks(target_chat_id)
-        print(f"Deleted {deleted} existing tasks.")
-
-    add_tasks(tasks)
+        replace_tasks(target_chat_id, tasks)
+        print(f"Replaced {existing} existing tasks atomically.")
+    else:
+        add_tasks(tasks)
 
     print(_summary(tasks))
     return 0

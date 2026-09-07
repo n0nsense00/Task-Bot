@@ -5,7 +5,7 @@ the inline actions available on ``/deadlines``.
 
 ``/clear`` wipes the visible chat history with the bot — both bot-sent
 messages and the user's own commands and replies — by iterating through
-the tracked-message list maintained by :class:`utils.tracking_bot.TrackingBot`
+the persistent SQLite tracker populated by :class:`utils.tracking_bot.TrackingBot`
 plus the group-1 incoming-message tracker. Telegram's 48-hour
 deletion window means anything older than that can't be removed; the
 confirmation message reports the count and self-deletes after 5 seconds.
@@ -14,16 +14,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from telegram import Message, Update
 from telegram.constants import ChatType, MessageEntityType, ParseMode
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 from telegram.ext import ContextTypes
 
+from config import CMD_CLEAR
 from database.db import (
     delete_deadline_dashboard,
+    delete_tracked_messages,
     get_deadline_dashboard_message_id,
+    list_tracked_messages,
+    save_tracked_message,
 )
-from utils.auth import admin_only, authorized_only
+from utils.auth import admin_only, authorized_only, is_supported_chat
 from utils.errors import safe
 from utils.format import DIVIDER, todays_tip
 from utils.tracking_bot import (
@@ -124,6 +130,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 _CLEAR_CONFIRMATION_TTL_SECONDS: int = 5
+_TELEGRAM_DELETE_WINDOW: timedelta = timedelta(hours=48)
+
+
+def _message_is_permanently_gone(error: BadRequest) -> bool:
+    """Return whether Telegram says the target message no longer exists."""
+    detail = str(error).lower()
+    return any(
+        marker in detail
+        for marker in (
+            "message to delete not found",
+            "message to edit not found",
+            "message not found",
+            "message_id_invalid",
+            "message identifier is not specified",
+        )
+    )
 
 
 @admin_only
@@ -131,30 +153,49 @@ _CLEAR_CONFIRMATION_TTL_SECONDS: int = 5
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle ``/clear``: delete every tracked bot/user message in this chat.
 
-    Iterates the ``tracked_messages`` list (chat-scoped) and calls
-    ``bot.delete_message`` for each. Telegram only allows deletion within 48h,
-    so older entries fail silently — the count of failures is reported in
-    the self-deleting confirmation. The /clear command's own message is
-    explicitly added to the deletion list before iterating so it disappears
-    on the first call (the group-1 tracker would otherwise only add it
-    AFTER /clear runs, requiring two calls to clean up).
+    Loads the chat-scoped persistent rows and calls ``bot.delete_message`` for
+    each recent candidate. Rows older than Telegram's 48-hour deletion window
+    are pruned without a guaranteed-to-fail API request. The /clear command's
+    own message is explicitly added to the deletion list before iterating so
+    it disappears on the first call (the group-1 tracker would otherwise only
+    add it AFTER /clear runs, requiring two calls to clean up).
     """
     chat = update.effective_chat
     if chat is None:
         return
     chat_id = chat.id
 
-    tracked = get_tracked_messages(context.bot)
+    tracked_memory = get_tracked_messages(context.bot)
+    tracked_rows = list_tracked_messages(chat_id)
+    cutoff = datetime.now(timezone.utc) - _TELEGRAM_DELETE_WINDOW
+    tracked_dates = {message_id: created_at for message_id, created_at in tracked_rows}
+    expired_ids = {
+        message_id
+        for message_id, created_at in tracked_rows
+        if created_at <= cutoff
+    }
+    if expired_ids:
+        delete_tracked_messages(chat_id, list(expired_ids))
+
     to_delete: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
-    for c, m in tracked:
-        if c != chat_id:
+    for message_id, _created_at in tracked_rows:
+        if message_id in expired_ids:
             continue
-        key = (c, m)
-        if key in seen:
-            continue
-        seen.add(key)
-        to_delete.append(key)
+        key = (chat_id, message_id)
+        if key not in seen:
+            seen.add(key)
+            to_delete.append(key)
+
+    # A dashboard registration may predate the persistent message-tracker
+    # migration. Include it explicitly unless its tracked timestamp proves it
+    # is already outside Telegram's deletion window.
+    dashboard_id = get_deadline_dashboard_message_id(chat_id)
+    if dashboard_id is not None and dashboard_id not in expired_ids:
+        dashboard = (chat_id, dashboard_id)
+        if dashboard not in seen:
+            seen.add(dashboard)
+            to_delete.append(dashboard)
 
     # The /clear command itself isn't yet in tracked_messages (group-1
     # tracker runs AFTER this handler). Add it explicitly so it gets
@@ -166,43 +207,100 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             to_delete.append(own)
 
     deleted = 0
-    failed = 0
+    permanently_unavailable = len(expired_ids)
+    retryable = 0
     deleted_ids: set[int] = set()
+    gone_ids: set[int] = set()
+    forget_ids: set[int] = set(expired_ids)
     for c, m in to_delete:
         try:
             await context.bot.delete_message(chat_id=c, message_id=m)
             deleted += 1
             deleted_ids.add(m)
+            forget_ids.add(m)
+        except BadRequest as exc:
+            # Invalid/already-gone/too-old message ids cannot become deletable
+            # on retry. Forget their tracker rows. Only drop a dashboard
+            # registration when Telegram specifically says the message is gone;
+            # an old dashboard can still be edited even though it cannot be
+            # deleted.
+            permanently_unavailable += 1
+            forget_ids.add(m)
+            if _message_is_permanently_gone(exc):
+                gone_ids.add(m)
+            logger.info(
+                "Telegram permanently rejected deleting message %s in chat %s: %s",
+                m,
+                c,
+                exc,
+            )
+        except Forbidden as exc:
+            permanently_unavailable += 1
+            forget_ids.add(m)
+            logger.warning(
+                "No permission to delete message %s in chat %s: %s", m, c, exc
+            )
+        except (NetworkError, RetryAfter) as exc:
+            # Preserve the row so the next /clear can retry after a transient
+            # Telegram/network failure. Legacy dashboards do not yet have a
+            # row, so adopt them here for the retry path.
+            retryable += 1
+            if m not in tracked_dates:
+                save_tracked_message(c, m)
+            logger.warning(
+                "Temporary failure deleting message %s in chat %s: %s", m, c, exc
+            )
         except Exception:
-            # >48h old, already deleted, or otherwise un-deletable.
-            failed += 1
+            # Unknown failures may be temporary. Keeping the row is safer than
+            # silently losing the only reference after a deployment restart.
+            retryable += 1
+            if m not in tracked_dates:
+                save_tracked_message(c, m)
+            logger.exception(
+                "Unexpected failure deleting message %s in chat %s", m, c
+            )
+
+    if forget_ids:
+        delete_tracked_messages(chat_id, list(forget_ids))
 
     # Only forget the persistent dashboard if it was ACTUALLY removed. A
     # dashboard Telegram refused to delete (older than 48h) still exists and
     # stays perfectly editable, so its registration must survive.
-    dashboard_id = get_deadline_dashboard_message_id(chat_id)
-    if dashboard_id is not None and dashboard_id in deleted_ids:
+    if dashboard_id is not None and dashboard_id in (deleted_ids | gone_ids):
         delete_deadline_dashboard(chat_id)
         logger.info(
             "Dashboard message %s deleted by /clear — registration dropped",
             dashboard_id,
         )
 
-    # Drop this chat's entries from tracking — succeeded or not, we shouldn't
-    # keep retrying these.
-    replace_tracked_messages(context.bot, [
-        (c, m) for c, m in tracked if c != chat_id
-    ])
+    # Keep the legacy in-memory cache aligned with SQLite. Other chats are
+    # untouched; retryable rows in this chat remain visible to old callers.
+    retained_ids = {message_id for message_id, _ in list_tracked_messages(chat_id)}
+    retained_memory = [
+        (c, m)
+        for c, m in tracked_memory
+        if c != chat_id or m in retained_ids
+    ]
+    for message_id in retained_ids:
+        pair = (chat_id, message_id)
+        if pair not in retained_memory:
+            retained_memory.append(pair)
+    replace_tracked_messages(context.bot, retained_memory)
 
     # Send a self-deleting confirmation. Skip tracking it (otherwise the
     # next /clear would inherit a stale id).
     set_skip_tracking(context.bot, True)
     try:
         text = f"🧹 Cleared {deleted} message{'s' if deleted != 1 else ''}."
-        if failed:
+        if permanently_unavailable:
             text += (
-                f"  <i>{failed} couldn't be removed "
+                f"  <i>{permanently_unavailable} couldn't be removed "
                 f"(older than 48h or already gone).</i>"
+            )
+        if retryable:
+            text += (
+                f"  <i>{retryable} temporary failure"
+                f"{'s' if retryable != 1 else ''} will be retried next time.</i>"
             )
         confirmation = await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=ParseMode.HTML
@@ -307,6 +405,8 @@ async def track_incoming_message(
     chat = update.effective_chat
     if message is None or chat is None:
         return
+    if not is_supported_chat(update):
+        return
 
     bot = context.bot
     if not _is_bot_related_message(
@@ -316,4 +416,16 @@ async def track_incoming_message(
     ):
         return
 
-    append_tracked_message(bot, chat.id, message.message_id)
+    # /clear handles its own command message immediately. The group-1 tracker
+    # runs afterwards, so recording it here would resurrect a row for a message
+    # that was just deleted.
+    first_token = (message.text or "").split(maxsplit=1)[0].lower()
+    if first_token.split("@", maxsplit=1)[0] == f"/{CMD_CLEAR}":
+        return
+
+    append_tracked_message(
+        bot,
+        chat.id,
+        message.message_id,
+        created_at=message.date,
+    )

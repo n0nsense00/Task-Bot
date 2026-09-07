@@ -12,7 +12,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS deadline_dashboards (
     message_id  INTEGER NOT NULL,
     updated_at  TEXT    NOT NULL
 );
+
+-- Messages that /clear may remove. Unlike the original in-memory tracker,
+-- these rows survive process and systemd restarts. created_at is stored as an
+-- aware UTC ISO timestamp so entries outside Telegram's deletion window can
+-- be discarded without making a guaranteed-to-fail API request.
+CREATE TABLE IF NOT EXISTS tracked_messages (
+    chat_id     INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tracked_messages_chat_created
+    ON tracked_messages(chat_id, created_at);
 """
 
 _TASK_INSERT_SQL: str = """
@@ -79,6 +92,10 @@ INSERT INTO tasks
     (chat_id, title, task_type, module_code, due_date, due_time,
      notes, completed, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_MODULE_INSERT_SQL: str = """
+INSERT OR REPLACE INTO modules (code, name) VALUES (?, ?)
 """
 
 
@@ -286,6 +303,42 @@ def add_tasks(tasks: list[Task]) -> list[int]:
     return ids
 
 
+def replace_tasks(chat_id: int, tasks: list[Task]) -> list[int]:
+    """Atomically replace every task belonging to ``chat_id``.
+
+    The delete and all inserts share one transaction. If any insert fails,
+    :func:`_get_conn` rolls the entire operation back, preserving the chat's
+    previous tasks. Tasks are always assigned to the explicit target chat,
+    regardless of any ``chat_id`` carried by the input objects.
+    """
+    created_at = datetime.now().isoformat(timespec="seconds")
+    ids: list[int] = []
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM tasks WHERE chat_id = ?", (chat_id,))
+        for task in tasks:
+            cur = conn.execute(
+                _TASK_INSERT_SQL,
+                (
+                    chat_id,
+                    task.title,
+                    task.task_type,
+                    task.module_code,
+                    task.due_date.isoformat(),
+                    task.due_time,
+                    task.notes,
+                    1 if task.completed else 0,
+                    created_at,
+                ),
+            )
+            ids.append(int(cur.lastrowid))
+
+    # Only reflect the assignment on caller-owned objects after the database
+    # transaction has committed successfully.
+    for task in tasks:
+        task.chat_id = chat_id
+    return ids
+
+
 def get_task(task_id: int, chat_id: int) -> Optional[Task]:
     """Return task ``task_id`` only when it belongs to ``chat_id``."""
     with _get_conn() as conn:
@@ -432,11 +485,22 @@ def get_module(code: str) -> Optional[Module]:
 def add_module(module: Module) -> bool:
     """Insert or replace a module row. Returns ``True`` always (no failure mode)."""
     with _get_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO modules (code, name) VALUES (?, ?)",
-            (module.code, module.name),
-        )
+        conn.execute(_MODULE_INSERT_SQL, (module.code, module.name))
     return True
+
+
+def replace_modules(modules: list[Module]) -> int:
+    """Atomically replace the complete module catalogue.
+
+    Returns the number of newly inserted modules. If any insert fails, the
+    delete and every preceding insert are rolled back together so the prior
+    catalogue remains intact.
+    """
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM modules")
+        for module in modules:
+            conn.execute(_MODULE_INSERT_SQL, (module.code, module.name))
+    return len(modules)
 
 
 def count_modules() -> int:
@@ -504,3 +568,87 @@ def delete_deadline_dashboard(chat_id: int) -> bool:
             "DELETE FROM deadline_dashboards WHERE chat_id = ?", (chat_id,)
         )
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Persistent /clear message tracking
+# ---------------------------------------------------------------------------
+
+
+def _as_utc(value: datetime | None = None) -> datetime:
+    """Return ``value`` as an aware UTC datetime (or UTC now when omitted)."""
+    resolved = value or datetime.now(timezone.utc)
+    if resolved.tzinfo is None:
+        # Telegram dates are UTC. Treat a legacy/test naive value the same way
+        # rather than applying the machine's local timezone implicitly.
+        return resolved.replace(tzinfo=timezone.utc)
+    return resolved.astimezone(timezone.utc)
+
+
+def save_tracked_message(
+    chat_id: int,
+    message_id: int,
+    created_at: datetime | None = None,
+) -> None:
+    """Persist one message that may later be removed by ``/clear``.
+
+    The key is idempotent because the outgoing ``send_message`` override and
+    the incoming catch-all can observe the same update paths more than once
+    after Telegram retries. On conflict the earliest observed timestamp is
+    retained, preventing a duplicate observation from making an old message
+    appear newly deletable.
+    """
+    timestamp = _as_utc(created_at).isoformat(timespec="seconds")
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO tracked_messages (chat_id, message_id, created_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                   created_at = MIN(tracked_messages.created_at,
+                                    excluded.created_at)""",
+            (chat_id, message_id, timestamp),
+        )
+
+
+def list_tracked_messages(chat_id: int) -> list[tuple[int, datetime]]:
+    """Return ``(message_id, created_at_utc)`` rows for one chat, oldest first."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """SELECT message_id, created_at
+                 FROM tracked_messages
+                WHERE chat_id = ?
+                ORDER BY created_at, message_id""",
+            (chat_id,),
+        ).fetchall()
+
+    tracked: list[tuple[int, datetime]] = []
+    for row in rows:
+        parsed = datetime.fromisoformat(str(row["created_at"]))
+        tracked.append((int(row["message_id"]), _as_utc(parsed)))
+    return tracked
+
+
+def delete_tracked_message(chat_id: int, message_id: int) -> bool:
+    """Forget one tracked message. Return whether a row was removed."""
+    with _get_conn() as conn:
+        cur = conn.execute(
+            """DELETE FROM tracked_messages
+                WHERE chat_id = ? AND message_id = ?""",
+            (chat_id, message_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_tracked_messages(chat_id: int, message_ids: list[int]) -> int:
+    """Forget the supplied message ids from ``chat_id`` in one transaction."""
+    unique_ids = sorted(set(message_ids))
+    if not unique_ids:
+        return 0
+    placeholders = ",".join("?" for _ in unique_ids)
+    with _get_conn() as conn:
+        cur = conn.execute(
+            f"""DELETE FROM tracked_messages
+                 WHERE chat_id = ? AND message_id IN ({placeholders})""",
+            (chat_id, *unique_ids),
+        )
+        return cur.rowcount

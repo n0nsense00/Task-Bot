@@ -147,8 +147,13 @@ def run_stress(task_count: int, query_count: int, mutation_count: int) -> None:
         )
         print(
             "mutation_latency_ms="
-            f"avg {statistics.fmean(mutation_timings):.3f}, "
-            f"p95 {_p95(mutation_timings):.3f}, max {max(mutation_timings):.3f}"
+            + (
+                f"avg {statistics.fmean(mutation_timings):.3f}, "
+                f"p95 {_p95(mutation_timings):.3f}, "
+                f"max {max(mutation_timings):.3f}"
+                if mutation_timings
+                else "n/a (no mutations run)"
+            )
         )
 
 
@@ -167,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         "--queries",
         type=int,
         default=1000,
-        help="Number of read iterations; each iteration runs three query types.",
+        help="Number of read iterations; each iteration runs two query types.",
     )
     parser.add_argument(
         "--mutations",
