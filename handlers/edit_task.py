@@ -1,4 +1,4 @@
-"""Multi-step edit conversation entered from the 📝 button on /today.
+"""Multi-step edit conversation entered from the deadline manager.
 
 Conversation state machine::
 
@@ -37,10 +37,8 @@ from telegram.ext import (
 
 from config import CMD_CANCEL
 from database.db import get_modules, get_task, update_task
-from handlers.tasks import (
-    is_tracked_deadline_dashboard,
-    refresh_deadline_dashboard,
-)
+from handlers.tasks import refresh_deadline_dashboard
+from handlers.transient import show_transient_view
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
 from utils.clock import today_local
@@ -162,12 +160,11 @@ async def _finish_edit_text(
 async def _finish_edit_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE, task: Task
 ) -> int:
-    """Complete a button-driven edit: persist, then restore or card, end.
+    """Complete a button-driven edit: persist, show a card, refresh, end.
 
-    When the edited message IS the persistent dashboard it is returned to the
-    live list rather than left showing an Updated card. Otherwise the Updated
-    card is kept (the user is looking at a historical message) and the tracked
-    dashboard is refreshed separately.
+    Edit buttons normally live on a transient manager. The shared display
+    helper still protects the persistent dashboard if an older button routes
+    a callback there after deployment.
 
     Callers have already answered the callback query, so no toast is raised
     here — answering the same query twice is an error.
@@ -176,23 +173,12 @@ async def _finish_edit_callback(
     query = update.callback_query
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
-    message_id = (
-        query.message.message_id
-        if query is not None and query.message is not None
-        else None
-    )
-
-    if (
-        chat_id is not None
-        and message_id is not None
-        and is_tracked_deadline_dashboard(chat_id, message_id)
-    ):
-        await refresh_deadline_dashboard(context.application, chat_id)
-        return _abort(update, context)
-
-    if query is not None:
-        await query.edit_message_text(
-            _updated_summary(task), parse_mode=ParseMode.HTML
+    if query is not None and chat_id is not None:
+        await show_transient_view(
+            query,
+            chat_id,
+            _updated_summary(task),
+            parse_mode=ParseMode.HTML,
         )
     if chat_id is not None:
         await refresh_deadline_dashboard(context.application, chat_id)
@@ -215,14 +201,14 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         task_id = int(parts[1])
     except ValueError:
-        await query.answer()
-        await query.edit_message_text("Invalid task id.")
+        await show_transient_view(query, chat.id, "Invalid task id.")
         return ConversationHandler.END
 
     task = get_task(task_id, chat.id)
     if task is None:
-        await query.answer()
-        await query.edit_message_text(f"Task #{task_id} not found.")
+        await show_transient_view(
+            query, chat.id, f"Task #{task_id} not found."
+        )
         return ConversationHandler.END
 
     active = begin_chat_flow(update, context, _FLOW_NAME)
@@ -240,7 +226,9 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         + format_task_card(task)
         + "\n\nWhich field?"
     )
-    await query.edit_message_text(
+    await show_transient_view(
+        query,
+        chat.id,
         body,
         parse_mode=ParseMode.HTML,
         reply_markup=build_edit_field_keyboard(task_id),
