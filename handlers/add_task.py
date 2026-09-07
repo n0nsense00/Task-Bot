@@ -58,6 +58,13 @@ from utils.format import (
     format_task_card,
     parse_notes_callback,
 )
+from utils.limits import (
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    field_length_error,
+)
 from utils.timepicker import (
     build_hour_keyboard,
     build_minute_keyboard,
@@ -224,6 +231,15 @@ async def add_module_text(
             "Module code can't be empty. Try again, or /cancel."
         )
         return MODULE_TEXT
+    error = field_length_error(
+        code,
+        label="Module code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
+        return MODULE_TEXT
     _draft(context)["module_code"] = code
     await message.reply_text(
         f"Module: <code>{code}</code>\n\n"
@@ -245,6 +261,12 @@ async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await message.reply_text(
             "Title can't be empty. Try again, or /cancel."
         )
+        return TITLE
+    error = field_length_error(
+        title, label="Title", maximum=TITLE_MAX_LENGTH
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
         return TITLE
     _draft(context)["title"] = title
 
@@ -454,6 +476,13 @@ async def add_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if message is None or message.text is None:
         return NOTES
     raw = message.text.strip()
+    if raw.lower() != _SKIP_KEYWORD:
+        error = field_length_error(
+            raw, label="Notes", maximum=NOTES_MAX_LENGTH
+        )
+        if error:
+            await message.reply_text(f"{error} Try again, or /cancel.")
+            return NOTES
     _draft(context)["notes"] = (
         None if raw.lower() == _SKIP_KEYWORD or not raw else raw
     )

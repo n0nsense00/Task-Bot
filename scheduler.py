@@ -42,11 +42,15 @@ from database.models import Task
 from utils.clock import today_local
 from utils.format import (
     DIVIDER,
+    TYPE_DISPLAY_ORDER,
+    TYPE_EMOJI,
+    TYPE_PLURAL,
     days_away_label,
-    format_grouped_today,
+    format_task_line,
     module_prefix,
     morning_greeting,
 )
+from utils.limits import fits_telegram_message
 
 logger = logging.getLogger(__name__)
 
@@ -116,29 +120,74 @@ def build_morning_brief(chat_id: int) -> str:
         return _CLEAR_DAY_MESSAGE
 
     lines: list[str] = [morning_greeting(), "", DIVIDER]
+    blocks: list[list[str]] = []
 
     if tasks:
-        lines.extend(format_grouped_today(tasks, today))
+        grouped: dict[str, list[Task]] = {}
+        for task in tasks:
+            grouped.setdefault(task.task_type, []).append(task)
+        for task_type in TYPE_DISPLAY_ORDER:
+            bucket = grouped.get(task_type, [])
+            for index, task in enumerate(bucket):
+                prefix = (
+                    [
+                        "",
+                        f"<b>{TYPE_EMOJI[task_type]} "
+                        f"{TYPE_PLURAL[task_type]}</b>",
+                    ]
+                    if index == 0
+                    else []
+                )
+                blocks.append(prefix + [format_task_line(task)])
     else:
-        lines.append("")
-        lines.append("<i>Nothing due today.</i>")
+        lines.extend(["", "<i>Nothing due today.</i>"])
 
-    if upcoming:
-        lines.append("")
-        lines.append(DIVIDER)
-        lines.append("")
-        lines.append("⏰ <b>Upcoming deadlines</b>")
-        for t in upcoming:
-            type_label = t.task_type.capitalize()
-            date_label = t.due_date.strftime("%a %d %b")
-            relative = days_away_label(t.due_date, today)
-            time_clause = f" at {t.due_time}" if t.due_time else ""
-            lines.append(
-                f"• {module_prefix(t)}{type_label} — "
-                f"{date_label}{time_clause} ({relative})  <code>#{t.id}</code>"
-            )
+    for index, task in enumerate(upcoming):
+        prefix = (
+            ["", DIVIDER, "", "⏰ <b>Upcoming deadlines</b>"]
+            if index == 0
+            else []
+        )
+        type_label = task.task_type.capitalize()
+        date_label = task.due_date.strftime("%a %d %b")
+        relative = days_away_label(task.due_date, today)
+        time_clause = f" at {task.due_time}" if task.due_time else ""
+        blocks.append(
+            prefix
+            + [
+                f"• {module_prefix(task)}{type_label} — "
+                f"{date_label}{time_clause} ({relative})  "
+                f"<code>#{task.id}</code>"
+            ]
+        )
 
-    return "\n".join(lines).rstrip()
+    shown = 0
+    total = len(blocks)
+    for block in blocks:
+        remaining = total - shown - 1
+        overflow = _brief_overflow_footer(remaining)
+        if not fits_telegram_message("\n".join(lines + block + overflow)):
+            break
+        lines.extend(block)
+        shown += 1
+
+    lines.extend(_brief_overflow_footer(total - shown))
+    text = "\n".join(lines).rstrip()
+    # Even a legacy row is bounded by format_task_line; this assertion catches
+    # future layout changes before Telegram rejects a scheduled message.
+    assert fits_telegram_message(text)
+    return text
+
+
+def _brief_overflow_footer(omitted: int) -> list[str]:
+    """Explain brief truncation while routing users to the full manager."""
+    if not omitted:
+        return []
+    return [
+        "",
+        f"<i>{omitted} more — use /deadlines, then Manage deadlines, "
+        "to view all.</i>",
+    ]
 
 
 def _brief_already_sent_today() -> bool:

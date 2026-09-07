@@ -46,6 +46,13 @@ from database.models import (  # noqa: E402
     TASK_TYPES,
     Task,
 )
+from utils.limits import (  # noqa: E402
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    field_length_error,
+)
 
 BASE_COLUMNS: tuple[str, ...] = (
     "title",
@@ -168,6 +175,9 @@ def _validate_row(raw: _RawRow) -> Task:
     title = (data.get("title") or "").strip()
     if not title:
         raise ValueError("title is required")
+    error = field_length_error(title, label="title", maximum=TITLE_MAX_LENGTH)
+    if error:
+        raise ValueError(error)
 
     task_type = (data.get("task_type") or "").strip().lower()
     if task_type not in TASK_TYPES:
@@ -179,6 +189,14 @@ def _validate_row(raw: _RawRow) -> Task:
     module_code = (data.get("module_code") or "").strip() or None
     if module_code is None:
         raise ValueError("module_code is required")
+    error = field_length_error(
+        module_code,
+        label="module_code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        raise ValueError(error)
 
     due_raw = (data.get("due_date") or "").strip()
     if not due_raw:
@@ -211,6 +229,12 @@ def _validate_row(raw: _RawRow) -> Task:
             )
 
     notes = (data.get("notes") or "").strip() or None
+    if notes is not None:
+        error = field_length_error(
+            notes, label="notes", maximum=NOTES_MAX_LENGTH
+        )
+        if error:
+            raise ValueError(error)
 
     return Task(
         title=title,

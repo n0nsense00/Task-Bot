@@ -66,6 +66,14 @@ from utils.format import (
     module_prefix,
     parse_notes_callback,
 )
+from utils.limits import (
+    MODULE_CODE_MAX_BYTES,
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    field_length_error,
+    shorten_text,
+)
 from utils.timepicker import (
     build_hour_keyboard,
     build_minute_keyboard,
@@ -257,7 +265,8 @@ async def edit_field_picked(
 
     header = (
         f"✏️ <b>Editing</b> <code>#{task_id}</code>: "
-        f"{module_prefix(task)}{esc(task.title)}\n"
+        f"{module_prefix(task)}"
+        f"{esc(shorten_text(task.title, TITLE_MAX_LENGTH))}\n"
     )
 
     if field == "title":
@@ -334,6 +343,12 @@ async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await message.reply_text(
             "Title can't be empty. Try again, or /cancel."
         )
+        return EDIT_TITLE
+    error = field_length_error(
+        new_title, label="Title", maximum=TITLE_MAX_LENGTH
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
         return EDIT_TITLE
 
     task = _load_task(update, context)
@@ -430,6 +445,15 @@ async def edit_module_text(
         await message.reply_text(
             "Module code can't be empty. Try again, or /cancel."
         )
+        return EDIT_MODULE_TEXT
+    error = field_length_error(
+        code,
+        label="Module code",
+        maximum=MODULE_CODE_MAX_LENGTH,
+        maximum_bytes=MODULE_CODE_MAX_BYTES,
+    )
+    if error:
+        await message.reply_text(f"{error} Try again, or /cancel.")
         return EDIT_MODULE_TEXT
 
     task = _load_task(update, context)
@@ -565,6 +589,13 @@ async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if message is None or message.text is None:
         return EDIT_NOTES
     raw = message.text.strip()
+    if raw.lower() != _CLEAR_KEYWORD:
+        error = field_length_error(
+            raw, label="Notes", maximum=NOTES_MAX_LENGTH
+        )
+        if error:
+            await message.reply_text(f"{error} Try again, or /cancel.")
+            return EDIT_NOTES
 
     task = _load_task(update, context)
     if task is None:

@@ -143,7 +143,9 @@ class _RefreshTestBase(unittest.IsolatedAsyncioTestCase):
 
     # -- helpers ----------------------------------------------------------
 
-    async def refresh(self, application: Mock, chat_id: int) -> bool:
+    async def refresh(
+        self, application: Mock, chat_id: int
+    ) -> tasks.DashboardRefreshResult:
         """Run a single-chat refresh with a frozen local date."""
         with patch.object(tasks, "today_local", return_value=TODAY):
             return await tasks.refresh_deadline_dashboard(application, chat_id)
@@ -189,7 +191,7 @@ class TestRefreshPayload(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.UPDATED)
         application.bot.edit_message_text.assert_awaited_once_with(
             chat_id=CHAT_A,
             message_id=MSG_A,
@@ -249,7 +251,7 @@ class TestRefreshPayload(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.UPDATED)
         application.bot.edit_message_text.assert_awaited_once_with(
             chat_id=CHAT_A,
             message_id=MSG_A,
@@ -276,11 +278,14 @@ class TestRefreshPayload(_RefreshTestBase):
 class TestRefreshWithoutRegistration(_RefreshTestBase):
     """An unregistered chat must be a pure no-op."""
 
-    async def test_returns_false(self) -> None:
+    async def test_returns_not_registered(self) -> None:
         self.add_deadline(CHAT_A)
         application = self.make_application()
 
-        self.assertFalse(await self.refresh(application, CHAT_A))
+        self.assertIs(
+            await self.refresh(application, CHAT_A),
+            tasks.DashboardRefreshResult.NOT_REGISTERED,
+        )
 
     async def test_makes_no_telegram_call_at_all(self) -> None:
         self.add_deadline(CHAT_A)
@@ -296,7 +301,10 @@ class TestRefreshWithoutRegistration(_RefreshTestBase):
         self.register(CHAT_B, MSG_B)
         application = self.make_application()
 
-        self.assertFalse(await self.refresh(application, CHAT_A))
+        self.assertIs(
+            await self.refresh(application, CHAT_A),
+            tasks.DashboardRefreshResult.NOT_REGISTERED,
+        )
         self.assertEqual(db.get_deadline_dashboard_message_id(CHAT_B), MSG_B)
 
 
@@ -316,7 +324,10 @@ class TestNotModified(_RefreshTestBase):
             side_effect=BadRequest(self.NOT_MODIFIED)
         )
 
-        self.assertTrue(await self.refresh(application, CHAT_A))
+        self.assertIs(
+            await self.refresh(application, CHAT_A),
+            tasks.DashboardRefreshResult.UNCHANGED,
+        )
 
     async def test_not_modified_retains_the_registration(self) -> None:
         self.add_deadline(CHAT_A)
@@ -348,7 +359,11 @@ class TestNotModified(_RefreshTestBase):
 
                 result = await self.refresh(application, CHAT_A)
 
-                self.assertTrue(result, "not-modified must count as success")
+                self.assertIs(
+                    result,
+                    tasks.DashboardRefreshResult.UNCHANGED,
+                    "not-modified must be distinguishable from an actual edit",
+                )
                 self.assertEqual(
                     db.get_deadline_dashboard_message_id(CHAT_A),
                     MSG_A,
@@ -385,7 +400,7 @@ class TestUnrecoverableBadRequest(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertFalse(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.GONE)
         self.assertIsNone(db.get_deadline_dashboard_message_id(CHAT_A))
         self.assertEqual(db.list_deadline_dashboards(), [])
         application.bot.edit_message_text.assert_awaited_once()
@@ -409,7 +424,7 @@ class TestUnrecoverableBadRequest(_RefreshTestBase):
 
                 result = await self.refresh(application, CHAT_A)
 
-                self.assertFalse(result)
+                self.assertIs(result, tasks.DashboardRefreshResult.GONE)
                 self.assertIsNone(
                     db.get_deadline_dashboard_message_id(CHAT_A),
                     f"{message!r} must drop the registration",
@@ -437,14 +452,14 @@ class TestUnrecoverableBadRequest(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.TRANSIENT_FAILURE)
         self.assertEqual(db.get_deadline_dashboard_message_id(CHAT_A), MSG_A)
 
 
 class TestForbidden(_RefreshTestBase):
     """Losing access to a chat must drop its registration."""
 
-    async def test_forbidden_drops_registration_and_returns_false(self) -> None:
+    async def test_forbidden_drops_registration_and_returns_gone(self) -> None:
         self.add_deadline(CHAT_A)
         self.register(CHAT_A, MSG_A)
         application = self.make_application(
@@ -455,7 +470,7 @@ class TestForbidden(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertFalse(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.GONE)
         self.assertIsNone(db.get_deadline_dashboard_message_id(CHAT_A))
         self.assertEqual(db.list_deadline_dashboards(), [])
 
@@ -492,7 +507,7 @@ class TestTransientErrors(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.TRANSIENT_FAILURE)
         self.assertEqual(db.get_deadline_dashboard_message_id(CHAT_A), MSG_A)
 
     async def test_plain_telegram_error_retains_registration(self) -> None:
@@ -506,7 +521,7 @@ class TestTransientErrors(_RefreshTestBase):
 
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.TRANSIENT_FAILURE)
         self.assertEqual(db.list_deadline_dashboards(), [(CHAT_A, MSG_A)])
 
     async def test_retry_after_transient_failure_succeeds(self) -> None:
@@ -518,7 +533,7 @@ class TestTransientErrors(_RefreshTestBase):
         application.bot.edit_message_text.side_effect = None
         result = await self.refresh(application, CHAT_A)
 
-        self.assertTrue(result)
+        self.assertIs(result, tasks.DashboardRefreshResult.UPDATED)
         self.assertEqual(application.bot.edit_message_text.await_count, 2)
         self.assertEqual(
             application.bot.edit_message_text.await_args.kwargs["message_id"],
@@ -658,8 +673,9 @@ class TestUnexpectedErrorContainment(_RefreshTestBase):
         ):
             result = await tasks.refresh_deadline_dashboard(application, CHAT_A)
 
-        self.assertTrue(
+        self.assertIs(
             result,
+            tasks.DashboardRefreshResult.TRANSIENT_FAILURE,
             "an unexpected error must not be reported as a lost registration",
         )
         self.assertEqual(

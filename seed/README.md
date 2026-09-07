@@ -60,12 +60,12 @@ Rules:
 
 | Column | Required | Format |
 | --- | --- | --- |
-| `title` | yes | any non-empty string |
+| `title` | yes | non-empty, at most 120 characters |
 | `task_type` | yes | `quiz`, `lab`, `assignment`, `project`, `midterm`, `final`, or `other` |
-| `module_code` | yes | a module code from your semester |
+| `module_code` | yes | a module code from your semester, at most 20 characters |
 | `due_date` | yes | `YYYY-MM-DD` |
 | `due_time` | no | blank, or `HH:MM` 24-hour time |
-| `notes` | no | any string, or blank |
+| `notes` | no | at most 500 characters, or blank |
 
 Lines starting with `#` are comments and skipped. Blank lines are skipped.
 Titles containing commas must be quoted, for example:
@@ -98,5 +98,6 @@ CS2040,Data Structures and Algorithms
 MH2100,Calculus III
 ```
 
-`code` is required. `name` is optional; if blank, Telegram picker buttons show
-only the code.
+`code` is required and limited to 20 characters. `name` is optional and
+limited to 100 characters; if blank, Telegram picker buttons show only the
+code.
