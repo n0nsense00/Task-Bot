@@ -38,9 +38,9 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from database.db import (  # noqa: E402  (sys.path hack above is intentional)
     add_tasks,
     count_tasks,
-    delete_all_tasks,
     get_default_chat_id,
     init_db,
+    replace_tasks,
 )
 from database.models import (  # noqa: E402
     TASK_TYPES,
@@ -295,10 +295,10 @@ def main(argv: list[str] | None = None) -> int:
         if not _confirm_replace(existing):
             print("Aborted. No changes made.")
             return 1
-        deleted = delete_all_tasks(target_chat_id)
-        print(f"Deleted {deleted} existing tasks.")
-
-    add_tasks(tasks)
+        replace_tasks(target_chat_id, tasks)
+        print(f"Replaced {existing} existing tasks atomically.")
+    else:
+        add_tasks(tasks)
 
     print(_summary(tasks))
     return 0

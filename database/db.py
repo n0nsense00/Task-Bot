@@ -81,6 +81,10 @@ INSERT INTO tasks
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+_MODULE_INSERT_SQL: str = """
+INSERT OR REPLACE INTO modules (code, name) VALUES (?, ?)
+"""
+
 
 def get_default_chat_id() -> int:
     """Return the configured owner DM id used for legacy rows and CSV seeds."""
@@ -286,6 +290,42 @@ def add_tasks(tasks: list[Task]) -> list[int]:
     return ids
 
 
+def replace_tasks(chat_id: int, tasks: list[Task]) -> list[int]:
+    """Atomically replace every task belonging to ``chat_id``.
+
+    The delete and all inserts share one transaction. If any insert fails,
+    :func:`_get_conn` rolls the entire operation back, preserving the chat's
+    previous tasks. Tasks are always assigned to the explicit target chat,
+    regardless of any ``chat_id`` carried by the input objects.
+    """
+    created_at = datetime.now().isoformat(timespec="seconds")
+    ids: list[int] = []
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM tasks WHERE chat_id = ?", (chat_id,))
+        for task in tasks:
+            cur = conn.execute(
+                _TASK_INSERT_SQL,
+                (
+                    chat_id,
+                    task.title,
+                    task.task_type,
+                    task.module_code,
+                    task.due_date.isoformat(),
+                    task.due_time,
+                    task.notes,
+                    1 if task.completed else 0,
+                    created_at,
+                ),
+            )
+            ids.append(int(cur.lastrowid))
+
+    # Only reflect the assignment on caller-owned objects after the database
+    # transaction has committed successfully.
+    for task in tasks:
+        task.chat_id = chat_id
+    return ids
+
+
 def get_task(task_id: int, chat_id: int) -> Optional[Task]:
     """Return task ``task_id`` only when it belongs to ``chat_id``."""
     with _get_conn() as conn:
@@ -432,11 +472,22 @@ def get_module(code: str) -> Optional[Module]:
 def add_module(module: Module) -> bool:
     """Insert or replace a module row. Returns ``True`` always (no failure mode)."""
     with _get_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO modules (code, name) VALUES (?, ?)",
-            (module.code, module.name),
-        )
+        conn.execute(_MODULE_INSERT_SQL, (module.code, module.name))
     return True
+
+
+def replace_modules(modules: list[Module]) -> int:
+    """Atomically replace the complete module catalogue.
+
+    Returns the number of newly inserted modules. If any insert fails, the
+    delete and every preceding insert are rolled back together so the prior
+    catalogue remains intact.
+    """
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM modules")
+        for module in modules:
+            conn.execute(_MODULE_INSERT_SQL, (module.code, module.name))
+    return len(modules)
 
 
 def count_modules() -> int:
