@@ -24,6 +24,7 @@ from database.models import (
     Module,
     Task,
 )
+from utils.clock import today_local
 
 # ---------------------------------------------------------------------------
 # Visual style constants
@@ -134,13 +135,14 @@ def module_label(module: Module) -> str:
 # Date formatting
 # ---------------------------------------------------------------------------
 
-def format_relative_date(target: date) -> str:
+def format_relative_date(target: date, today: date | None = None) -> str:
     """Render ``target`` relative to today.
 
     Examples: ``today``, ``tomorrow``, ``yesterday``, ``in 3 days``,
     ``2 days ago``, or ``Wed 7 May`` for anything beyond a week.
     """
-    delta = (target - date.today()).days
+    reference_date = today if today is not None else today_local()
+    delta = (target - reference_date).days
     if delta == 0:
         return "today"
     if delta == 1:
@@ -212,7 +214,7 @@ def format_task_line(task: Task) -> str:
     return line
 
 
-def format_task_card(task: Task) -> str:
+def format_task_card(task: Task, today: date | None = None) -> str:
     """Multi-line rich render of a single task.
 
     Used for confirmations (delete, edit) and the post-/add summary.
@@ -220,7 +222,7 @@ def format_task_card(task: Task) -> str:
     date, time (if set), notes (if set), and ID.
     """
     type_emoji = TYPE_EMOJI.get(task.task_type, "•")
-    relative = format_relative_date(task.due_date)
+    relative = format_relative_date(task.due_date, today=today)
     absolute = task.due_date.strftime("%a %d %b %Y")
     time_clause = f" at {esc(task.due_time)}" if task.due_time else ""
 
@@ -536,20 +538,21 @@ def build_edit_type_keyboard(task_id: int) -> InlineKeyboardMarkup:
 # Greetings, tips, dividers
 # ---------------------------------------------------------------------------
 
-def todays_tip() -> str:
+def todays_tip(today: date | None = None) -> str:
     """Return one tip from :data:`TIPS`, rotated by date.
 
     Same tip shows all day; cycles forward each midnight. Stable across
     multiple commands within the same day so the user isn't whipsawed.
     """
-    idx = date.today().toordinal() % len(TIPS)
+    reference_date = today if today is not None else today_local()
+    idx = reference_date.toordinal() % len(TIPS)
     return TIPS[idx]
 
 
-def morning_greeting() -> str:
+def morning_greeting(today: date | None = None) -> str:
     """Two-line bold greeting + italic full date used at the top of /today and /brief."""
-    today = date.today()
+    reference_date = today if today is not None else today_local()
     return (
         f"☀️ <b>Good morning!</b>\n"
-        f"<i>{today.strftime('%A, %d %b %Y')}</i>"
+        f"<i>{reference_date.strftime('%A, %d %b %Y')}</i>"
     )

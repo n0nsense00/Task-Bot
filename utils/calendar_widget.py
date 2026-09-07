@@ -31,6 +31,8 @@ from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from utils.clock import today_local
+
 CB_PREFIX: str = "cal"
 NOOP_DATA: str = f"{CB_PREFIX}:noop"
 
@@ -138,17 +140,21 @@ def parse_calendar_callback(data: str) -> tuple[str, Optional[str]]:
     return ("unknown", None)
 
 
-def shortcut_to_date(key: str) -> Optional[date]:
-    """Resolve a shortcut key (``today`` / ``tomorrow`` / ``+7d`` / ``+30d``)."""
-    today = date.today()
+def shortcut_to_date(key: str, today: date | None = None) -> Optional[date]:
+    """Resolve a shortcut relative to the configured local calendar day.
+
+    Callers may pass ``today`` to keep a multi-step render anchored to one
+    captured date and to make boundary tests deterministic.
+    """
+    reference_date = today if today is not None else today_local()
     if key == "today":
-        return today
+        return reference_date
     if key == "tomorrow":
-        return today + timedelta(days=1)
+        return reference_date + timedelta(days=1)
     if key == "+7d":
-        return today + timedelta(days=7)
+        return reference_date + timedelta(days=7)
     if key == "+30d":
-        return today + timedelta(days=30)
+        return reference_date + timedelta(days=30)
     return None
 
 

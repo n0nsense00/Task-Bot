@@ -22,7 +22,6 @@ is cleared on END / /cancel so future conversations start fresh.
 from __future__ import annotations
 
 import logging
-from datetime import date as _date
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -41,6 +40,7 @@ from database.db import add_task, get_modules
 from handlers.tasks import refresh_deadline_dashboard
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
+from utils.clock import today_local
 from utils.calendar_widget import (
     build_calendar_keyboard,
     calendar_header_text,
@@ -248,7 +248,7 @@ async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return TITLE
     _draft(context)["title"] = title
 
-    today = _date.today()
+    today = today_local()
     await message.reply_text(
         "📅 <b>When is it due?</b>\n\n"
         f"<code>{calendar_header_text()}</code>",
