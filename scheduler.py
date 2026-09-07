@@ -43,6 +43,7 @@ from utils.clock import today_local
 from utils.format import (
     DIVIDER,
     days_away_label,
+    esc,
     format_grouped_today,
     module_prefix,
     morning_greeting,
@@ -85,7 +86,9 @@ def _resolve_timezone() -> ZoneInfo:
 def _upcoming_deadlines(chat_id: int, today: date) -> list[Task]:
     """Return up to ``_UPCOMING_LIMIT`` upcoming deadlines within the window.
 
-    "Upcoming" means ``today <= due_date <= today + _UPCOMING_WINDOW_DAYS``.
+    "Upcoming" means ``today < due_date <= today + _UPCOMING_WINDOW_DAYS``.
+    Items due today are rendered in their own section by
+    :func:`build_morning_brief` and must not consume the future-preview limit.
     :func:`get_semester_deadlines` already sorts by ``due_date`` ascending, so
     slicing the filtered list preserves chronological order.
     """
@@ -93,7 +96,7 @@ def _upcoming_deadlines(chat_id: int, today: date) -> list[Task]:
     candidates = [
         t
         for t in get_semester_deadlines(chat_id)
-        if today.toordinal() <= t.due_date.toordinal() <= window_end_ord
+        if today.toordinal() < t.due_date.toordinal() <= window_end_ord
     ]
     return candidates[:_UPCOMING_LIMIT]
 
@@ -132,9 +135,10 @@ def build_morning_brief(chat_id: int, today: date | None = None) -> str:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
             relative = days_away_label(t.due_date, reference_date)
-            time_clause = f" at {t.due_time}" if t.due_time else ""
+            time_clause = f" at {esc(t.due_time)}" if t.due_time else ""
             lines.append(
-                f"• {module_prefix(t)}{type_label} — "
+                f"• {module_prefix(t)}<b>{esc(t.title)}</b> · "
+                f"{esc(type_label)} — "
                 f"{date_label}{time_clause} ({relative})  <code>#{t.id}</code>"
             )
 
