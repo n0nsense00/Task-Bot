@@ -24,8 +24,8 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from database.db import (  # noqa: E402
     add_module,
     count_modules,
-    delete_all_modules,
     init_db,
+    replace_modules,
 )
 from database.models import Module  # noqa: E402
 from utils.limits import (  # noqa: E402
@@ -168,11 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         if not _confirm_replace(existing):
             print("Aborted. No changes made.")
             return 1
-        deleted = delete_all_modules()
-        print(f"Deleted {deleted} existing module(s).")
-
-    for module in modules:
-        add_module(module)
+        replace_modules(modules)
+        print(f"Replaced {existing} existing module(s) atomically.")
+    else:
+        for module in modules:
+            add_module(module)
 
     print(f"Imported {len(modules)} module(s).")
     return 0
