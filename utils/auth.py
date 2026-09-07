@@ -32,6 +32,31 @@ logger = logging.getLogger(__name__)
 HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
 
 
+def is_supported_chat(update: Update) -> bool:
+    """Return whether ``update`` belongs to a configured bot chat.
+
+    The supported scope is deliberately independent of the kill switch: it
+    answers only *where* the update came from, not whether a non-owner handler
+    should currently respond.  This makes the same check safe to reuse for
+    bookkeeping such as incoming-message tracking.
+
+    A supported update comes from either the owner's private bot chat (where
+    both the user id and chat id equal ``MY_TELEGRAM_ID``) or the configured
+    group chat.  Updates without an effective user/chat, outsider DMs, other
+    groups, and channels are rejected.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return False
+
+    is_owner_private_chat = (
+        user.id == MY_TELEGRAM_ID and chat.id == MY_TELEGRAM_ID
+    )
+    in_allowed_chat = ALLOWED_CHAT_ID != 0 and chat.id == ALLOWED_CHAT_ID
+    return is_owner_private_chat or in_allowed_chat
+
+
 def authorized_only(func: HandlerFunc) -> HandlerFunc:
     """Restrict a handler to the owner's DM or the one allowed group.
 
@@ -51,11 +76,7 @@ def authorized_only(func: HandlerFunc) -> HandlerFunc:
         chat = update.effective_chat
         user = update.effective_user
         is_owner = user is not None and user.id == MY_TELEGRAM_ID
-        is_owner_private_chat = (
-            is_owner and chat is not None and chat.id == MY_TELEGRAM_ID
-        )
-        in_allowed_chat = chat is not None and chat.id == ALLOWED_CHAT_ID
-        if not (is_owner_private_chat or in_allowed_chat):
+        if not is_supported_chat(update):
             logger.warning(
                 "Unauthorized: chat_id=%s chat_type=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
@@ -92,11 +113,7 @@ def admin_only(func: HandlerFunc) -> HandlerFunc:
         chat = update.effective_chat
         user = update.effective_user
         is_owner = user is not None and user.id == MY_TELEGRAM_ID
-        in_supported_chat = chat is not None and chat.id in (
-            MY_TELEGRAM_ID,
-            ALLOWED_CHAT_ID,
-        )
-        if not (is_owner and in_supported_chat):
+        if not (is_owner and is_supported_chat(update)):
             logger.warning(
                 "Admin-only refused: chat_id=%s user_id=%s username=%s",
                 getattr(chat, "id", None),
