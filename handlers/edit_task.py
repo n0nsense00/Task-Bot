@@ -16,8 +16,9 @@ Conversation state machine::
 Module/Due/Time use the same inline pickers as /add. Title, Type, and Notes
 use the same text+keyboard input as before.
 
-Target task id is stashed in ``context.user_data`` so subsequent state
-handlers know which row to mutate. Cleared on END / /cancel.
+Target task ids are stashed in ``context.user_data`` by Telegram chat id so a
+user can edit independently in their personal and group chats.  State is
+cleared for only the current chat on END / /cancel.
 """
 from __future__ import annotations
 
@@ -50,6 +51,13 @@ from utils.calendar_widget import (
     parse_iso_date,
     parse_year_month,
     shortcut_to_date,
+)
+from utils.conversation_state import (
+    begin_chat_flow,
+    clear_chat_value,
+    finish_chat_flow,
+    get_chat_value,
+    set_chat_value,
 )
 from utils.errors import safe
 from utils.format import (
@@ -86,12 +94,15 @@ EDIT_TIME = 206
 EDIT_NOTES = 208
 
 _CLEAR_KEYWORD: str = "clear"
-_USER_DATA_TASK_ID: str = "edit_task_id"
+_USER_DATA_TASK_ID: str = "edit_task_ids"
+_FLOW_NAME: str = "edit"
 
 
-def _draft_task_id(context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    """Return the task id stashed in user_data, or ``None`` if missing/invalid."""
-    raw = context.user_data.get(_USER_DATA_TASK_ID)
+def _draft_task_id(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int | None:
+    """Return this chat's stashed task id, or ``None`` if missing/invalid."""
+    raw = get_chat_value(update, context, _USER_DATA_TASK_ID)
     if raw is None:
         return None
     try:
@@ -114,16 +125,17 @@ def _load_task(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> Task | None:
     """Helper used by every state handler — fetch the in-progress task or None."""
-    task_id = _draft_task_id(context)
+    task_id = _draft_task_id(update, context)
     chat = update.effective_chat
     if task_id is None or chat is None:
         return None
     return get_task(task_id, chat.id)
 
 
-def _abort(context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Drop user_data and end the conversation. Used by error paths."""
-    context.user_data.pop(_USER_DATA_TASK_ID, None)
+def _abort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Drop only this chat's edit state and end the conversation."""
+    clear_chat_value(update, context, _USER_DATA_TASK_ID)
+    finish_chat_flow(update, context, _FLOW_NAME)
     return ConversationHandler.END
 
 
@@ -144,7 +156,7 @@ async def _finish_edit_text(
     chat = update.effective_chat
     if chat is not None:
         await refresh_deadline_dashboard(context.application, chat.id)
-    return _abort(context)
+    return _abort(update, context)
 
 
 async def _finish_edit_callback(
@@ -176,7 +188,7 @@ async def _finish_edit_callback(
         and is_tracked_deadline_dashboard(chat_id, message_id)
     ):
         await refresh_deadline_dashboard(context.application, chat_id)
-        return _abort(context)
+        return _abort(update, context)
 
     if query is not None:
         await query.edit_message_text(
@@ -184,7 +196,7 @@ async def _finish_edit_callback(
         )
     if chat_id is not None:
         await refresh_deadline_dashboard(context.application, chat_id)
-    return _abort(context)
+    return _abort(update, context)
 
 
 @authorized_only
@@ -195,24 +207,34 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat = update.effective_chat
     if query is None or query.data is None or chat is None:
         return ConversationHandler.END
-    await query.answer()
-
     parts = query.data.split(":", 1)
     if len(parts) != 2 or parts[0] != CB_EDIT:
+        await query.answer()
         return ConversationHandler.END
 
     try:
         task_id = int(parts[1])
     except ValueError:
+        await query.answer()
         await query.edit_message_text("Invalid task id.")
         return ConversationHandler.END
 
     task = get_task(task_id, chat.id)
     if task is None:
+        await query.answer()
         await query.edit_message_text(f"Task #{task_id} not found.")
         return ConversationHandler.END
 
-    context.user_data[_USER_DATA_TASK_ID] = task_id
+    active = begin_chat_flow(update, context, _FLOW_NAME)
+    if active is not None:
+        await query.answer(
+            f"Finish the current /{active} first, or send /cancel.",
+            show_alert=True,
+        )
+        return ConversationHandler.END
+
+    await query.answer()
+    set_chat_value(update, context, _USER_DATA_TASK_ID, task_id)
     body = (
         f"✏️ <b>Editing task</b> <code>#{task_id}</code>\n\n"
         + format_task_card(task)
@@ -247,13 +269,13 @@ async def edit_field_picked(
         task_id = int(parts[2])
     except ValueError:
         await query.edit_message_text("Invalid task id.")
-        return _abort(context)
+        return _abort(update, context)
 
-    context.user_data[_USER_DATA_TASK_ID] = task_id
+    set_chat_value(update, context, _USER_DATA_TASK_ID, task_id)
     task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text(f"Task #{task_id} no longer exists.")
-        return _abort(context)
+        return _abort(update, context)
 
     header = (
         f"✏️ <b>Editing</b> <code>#{task_id}</code>: "
@@ -319,7 +341,7 @@ async def edit_field_picked(
         return EDIT_NOTES
 
     await query.edit_message_text("Unknown field. Edit cancelled.")
-    return _abort(context)
+    return _abort(update, context)
 
 
 @authorized_only
@@ -339,7 +361,7 @@ async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     task.title = new_title
     return await _finish_edit_text(update, context, task)
 
@@ -357,21 +379,21 @@ async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     parts = query.data.split(":", 2)
     if len(parts) != 3 or parts[0] != CB_EDIT_TYPE_VALUE:
         await query.edit_message_text("Invalid selection. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     new_type = parts[1]
     if new_type not in TASK_TYPES:
         await query.edit_message_text("Invalid type. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     try:
         task_id = int(parts[2])
     except ValueError:
         await query.edit_message_text("Invalid task id. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
 
     task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     task.task_type = new_type
     return await _finish_edit_callback(update, context, task)
 
@@ -391,7 +413,7 @@ async def edit_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if rest == "cancel":
         await query.edit_message_text("Edit cancelled. No changes made.")
-        return _abort(context)
+        return _abort(update, context)
 
     if rest == "other":
         await query.edit_message_text(
@@ -404,7 +426,7 @@ async def edit_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     task = _load_task(update, context)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
 
     if rest == "clear":
         task.module_code = None
@@ -435,7 +457,7 @@ async def edit_module_text(
     task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     task.module_code = code
     return await _finish_edit_text(update, context, task)
 
@@ -457,7 +479,7 @@ async def edit_due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "cancel":
         await query.answer("Cancelled")
         await query.edit_message_text("Edit cancelled. No changes made.")
-        return _abort(context)
+        return _abort(update, context)
 
     if action == "nav" and payload is not None:
         ym = parse_year_month(payload)
@@ -481,7 +503,7 @@ async def edit_due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     task = _load_task(update, context)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
     task.due_date = selected
     await query.answer()
     return await _finish_edit_callback(update, context, task)
@@ -500,7 +522,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "cancel":
         await query.answer("Cancelled")
         await query.edit_message_text("Edit cancelled. No changes made.")
-        return _abort(context)
+        return _abort(update, context)
 
     if action == "skip":
         task = _load_task(update, context)
@@ -508,7 +530,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
             )
-            return _abort(context)
+            return _abort(update, context)
         task.due_time = None
         await query.answer()
         return await _finish_edit_callback(update, context, task)
@@ -548,7 +570,7 @@ async def edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
             )
-            return _abort(context)
+            return _abort(update, context)
         task.due_time = time_str
         await query.answer()
         return await _finish_edit_callback(update, context, task)
@@ -569,7 +591,7 @@ async def edit_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     task = _load_task(update, context)
     if task is None:
         await message.reply_text("Task no longer exists. Edit cancelled.")
-        return _abort(context)
+        return _abort(update, context)
 
     task.notes = (
         None if raw.lower() == _CLEAR_KEYWORD or not raw else raw
@@ -591,14 +613,14 @@ async def edit_notes_callback(
     action = parse_notes_callback(query.data)
     if action == "cancel":
         await query.edit_message_text("Edit cancelled. No changes made.")
-        return _abort(context)
+        return _abort(update, context)
     if action in ("clear", "skip"):
         task = _load_task(update, context)
         if task is None:
             await query.edit_message_text(
                 "Task no longer exists. Edit cancelled."
             )
-            return _abort(context)
+            return _abort(update, context)
         task.notes = None
         return await _finish_edit_callback(update, context, task)
     return EDIT_NOTES
@@ -618,7 +640,7 @@ async def edit_cancel_callback(
         await query.edit_message_text("Edit cancelled. No changes made.")
     except Exception:
         logger.exception("Failed to edit message after edit cancel")
-    return _abort(context)
+    return _abort(update, context)
 
 
 @authorized_only
@@ -630,7 +652,7 @@ async def edit_cancel_command(
     message = update.effective_message
     if message is not None:
         await message.reply_text("Edit cancelled. No changes made.")
-    return _abort(context)
+    return _abort(update, context)
 
 
 def build_edit_conversation() -> ConversationHandler:
