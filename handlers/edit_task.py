@@ -22,7 +22,6 @@ handlers know which row to mutate. Cleared on END / /cancel.
 from __future__ import annotations
 
 import logging
-from datetime import date as _date
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -43,6 +42,7 @@ from handlers.tasks import (
 )
 from database.models import TASK_TYPES, Task
 from utils.auth import authorized_only
+from utils.clock import today_local
 from utils.calendar_widget import (
     build_calendar_keyboard,
     calendar_header_text,
@@ -293,7 +293,7 @@ async def edit_field_picked(
         return EDIT_MODULE
 
     if field == "due":
-        today = _date.today()
+        today = today_local()
         await query.edit_message_text(
             header + "\nPick the new due date:\n\n"
             f"<code>{calendar_header_text()}</code>",

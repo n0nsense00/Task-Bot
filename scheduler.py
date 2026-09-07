@@ -98,7 +98,7 @@ def _upcoming_deadlines(chat_id: int, today: date) -> list[Task]:
     return candidates[:_UPCOMING_LIMIT]
 
 
-def build_morning_brief(chat_id: int) -> str:
+def build_morning_brief(chat_id: int, today: date | None = None) -> str:
     """Assemble the morning brief as an HTML-formatted string.
 
     Layout shows today's assessed items followed by a near-term preview.
@@ -106,19 +106,19 @@ def build_morning_brief(chat_id: int) -> str:
     when there is nothing due today AND no upcoming deadlines in the next
     fortnight, so the morning push doesn't pester the user with empty lists.
     """
-    today = today_local()
+    reference_date = today if today is not None else today_local()
     tasks = [
-        t for t in get_semester_deadlines(chat_id) if t.due_date == today
+        t for t in get_semester_deadlines(chat_id) if t.due_date == reference_date
     ]
-    upcoming = _upcoming_deadlines(chat_id, today)
+    upcoming = _upcoming_deadlines(chat_id, reference_date)
 
     if not tasks and not upcoming:
         return _CLEAR_DAY_MESSAGE
 
-    lines: list[str] = [morning_greeting(), "", DIVIDER]
+    lines: list[str] = [morning_greeting(reference_date), "", DIVIDER]
 
     if tasks:
-        lines.extend(format_grouped_today(tasks, today))
+        lines.extend(format_grouped_today(tasks, reference_date))
     else:
         lines.append("")
         lines.append("<i>Nothing due today.</i>")
@@ -131,7 +131,7 @@ def build_morning_brief(chat_id: int) -> str:
         for t in upcoming:
             type_label = t.task_type.capitalize()
             date_label = t.due_date.strftime("%a %d %b")
-            relative = days_away_label(t.due_date, today)
+            relative = days_away_label(t.due_date, reference_date)
             time_clause = f" at {t.due_time}" if t.due_time else ""
             lines.append(
                 f"• {module_prefix(t)}{type_label} — "
@@ -141,14 +141,15 @@ def build_morning_brief(chat_id: int) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _brief_already_sent_today() -> bool:
+def _brief_already_sent_today(today: date | None = None) -> bool:
     """Return ``True`` if ``data/last_brief.txt`` records today's date."""
+    reference_date = today if today is not None else today_local()
     try:
         content = _LAST_BRIEF_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return False
     try:
-        return date.fromisoformat(content) == date.today()
+        return date.fromisoformat(content) == reference_date
     except ValueError:
         return False
 
@@ -167,13 +168,14 @@ async def send_morning_brief(application: Application) -> None:
     can't crash the scheduler.
     """
     try:
-        text = build_morning_brief(MY_TELEGRAM_ID)
+        local_day = today_local()
+        text = build_morning_brief(MY_TELEGRAM_ID, today=local_day)
         await application.bot.send_message(
             chat_id=MY_TELEGRAM_ID,
             text=text,
             parse_mode=ParseMode.HTML,
         )
-        _record_brief_sent(date.today())
+        _record_brief_sent(local_day)
         logger.info("Morning brief sent")
     except Exception:
         logger.exception("Morning brief job failed")
@@ -191,11 +193,11 @@ async def catch_up_missed_brief(application: Application) -> None:
             "skipping catch-up."
         )
         return
-    if _brief_already_sent_today():
-        logger.info("Today's brief already sent — skipping catch-up.")
-        return
     tz = _resolve_timezone()
     now = datetime.now(tz)
+    if _brief_already_sent_today(now.date()):
+        logger.info("Today's brief already sent — skipping catch-up.")
+        return
     scheduled_today = now.replace(
         hour=BRIEF_HOUR, minute=BRIEF_MINUTE, second=0, microsecond=0
     )
