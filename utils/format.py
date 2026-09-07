@@ -25,6 +25,13 @@ from database.models import (
     Task,
 )
 from utils.clock import today_local
+from utils.limits import (
+    MODULE_CODE_MAX_LENGTH,
+    NOTES_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    fits_callback_data,
+    shorten_text,
+)
 
 # ---------------------------------------------------------------------------
 # Visual style constants
@@ -113,7 +120,11 @@ def esc(text: str | None) -> str:
 
 def module_prefix(task: Task) -> str:
     """Return ``[MODULE] `` (with trailing space) or ``""`` when no module_code."""
-    return f"[{esc(task.module_code)}] " if task.module_code else ""
+    return (
+        f"[{esc(shorten_text(task.module_code, MODULE_CODE_MAX_LENGTH))}] "
+        if task.module_code
+        else ""
+    )
 
 
 def module_label(module: Module) -> str:
@@ -206,11 +217,12 @@ def format_task_line(task: Task) -> str:
     """
     time_suffix = f" <i>at {esc(task.due_time)}</i>" if task.due_time else ""
     line = (
-        f"• {module_prefix(task)}{esc(task.title)}{time_suffix}  "
+        f"• {module_prefix(task)}"
+        f"{esc(shorten_text(task.title, TITLE_MAX_LENGTH))}{time_suffix}  "
         f"<code>#{task.id}</code>"
     )
     if task.notes:
-        line += f"\n  <i>{esc(task.notes)}</i>"
+        line += f"\n  <i>{esc(shorten_text(task.notes, NOTES_MAX_LENGTH))}</i>"
     return line
 
 
@@ -227,14 +239,15 @@ def format_task_card(task: Task, today: date | None = None) -> str:
     time_clause = f" at {esc(task.due_time)}" if task.due_time else ""
 
     lines: list[str] = [
-        f"{type_emoji} {module_prefix(task)}<b>{esc(task.title)}</b>  "
+        f"{type_emoji} {module_prefix(task)}"
+        f"<b>{esc(shorten_text(task.title, TITLE_MAX_LENGTH))}</b>  "
         f"<code>#{task.id}</code>",
         f"<i>{esc(task.task_type.capitalize())} · "
         f"{relative} ({absolute}){time_clause}</i>",
     ]
     if task.notes:
         lines.append("")
-        lines.append(esc(task.notes))
+        lines.append(esc(shorten_text(task.notes, NOTES_MAX_LENGTH)))
     return "\n".join(lines)
 
 
@@ -472,11 +485,16 @@ def build_module_keyboard(
     """
     rows: list[list[InlineKeyboardButton]] = []
     for module in modules:
+        callback_data = f"{CB_MODULE}:select:{module.code}"
+        # Old databases may predate field validation.  Never let one legacy
+        # module make the whole keyboard invalid at Telegram's API boundary.
+        if not fits_callback_data(callback_data):
+            continue
         rows.append(
             [
                 InlineKeyboardButton(
                     module_label(module),
-                    callback_data=f"{CB_MODULE}:select:{module.code}",
+                    callback_data=callback_data,
                 )
             ]
         )

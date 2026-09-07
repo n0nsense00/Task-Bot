@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date
+from enum import Enum, auto
 
 from telegram import InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
@@ -48,6 +49,11 @@ from utils.format import (
     module_prefix,
     urgency_emoji,
 )
+from utils.limits import (
+    TITLE_MAX_LENGTH,
+    fits_telegram_message,
+    shorten_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +70,8 @@ def _deadline_line(task: Task, status_emoji: str, today: date) -> list[str]:
     time_clause = f" at {esc(task.due_time)}" if task.due_time else ""
     relative = days_away_label(task.due_date, today)
     return [
-        f"{status_emoji} {module_prefix(task)}<b>{esc(task.title)}</b>",
+        f"{status_emoji} {module_prefix(task)}"
+        f"<b>{esc(shorten_text(task.title, TITLE_MAX_LENGTH))}</b>",
         f"   {type_emoji} {esc(task.task_type.capitalize())} · "
         f"{date_label}{time_clause} · {relative} · <code>#{task.id}</code>",
     ]
@@ -107,21 +114,37 @@ def render_deadlines(
         )
 
     lines: list[str] = ["📅 <b>Upcoming Deadlines</b>", "", DIVIDER, ""]
+    shown = 0
     for task in upcoming:
-        lines.extend(
-            _deadline_line(
-                task,
-                urgency_emoji(task.due_date, reference_date),
-                reference_date,
-            )
+        entry = _deadline_line(
+            task,
+            urgency_emoji(task.due_date, reference_date),
+            reference_date,
         )
-    lines.extend(["", DIVIDER, ""])
-    lines.append(
-        f"<i>{len(upcoming)} pending · sorted by due date</i>"
-    )
-    lines.append("<i>Tap Manage deadlines to complete, edit, or delete.</i>")
+        remaining = len(upcoming) - shown - 1
+        footer = _deadline_footer(len(upcoming), remaining)
+        candidate = "\n".join(lines + entry + footer)
+        if not fits_telegram_message(candidate):
+            break
+        lines.extend(entry)
+        shown += 1
+    lines.extend(_deadline_footer(len(upcoming), len(upcoming) - shown))
 
     return "\n".join(lines), build_deadline_dashboard_keyboard()
+
+
+def _deadline_footer(total: int, omitted: int) -> list[str]:
+    """Return a size-aware dashboard footer with an explicit overflow hint."""
+    lines = ["", DIVIDER, "", f"<i>{total} pending · sorted by due date</i>"]
+    if omitted:
+        lines.append(
+            f"<i>{omitted} more — tap Manage deadlines to view all.</i>"
+        )
+    else:
+        lines.append(
+            "<i>Tap Manage deadlines to complete, edit, or delete.</i>"
+        )
+    return lines
 
 
 def render_deadline_picker(
@@ -175,6 +198,16 @@ _UNRECOVERABLE_FRAGMENTS: tuple[str, ...] = (
 _dashboard_locks: dict[int, asyncio.Lock] = {}
 
 
+class DashboardRefreshResult(Enum):
+    """Precise outcomes for an attempted persistent-dashboard refresh."""
+
+    UPDATED = auto()
+    UNCHANGED = auto()
+    TRANSIENT_FAILURE = auto()
+    GONE = auto()
+    NOT_REGISTERED = auto()
+
+
 def _dashboard_lock(chat_id: int) -> asyncio.Lock:
     """Return (creating on first use) the refresh lock for ``chat_id``."""
     lock = _dashboard_locks.get(chat_id)
@@ -202,13 +235,11 @@ def _is_unrecoverable(exc: BadRequest) -> bool:
 
 async def refresh_deadline_dashboard(
     application: Application, chat_id: int
-) -> bool:
+) -> DashboardRefreshResult:
     """Re-render ``chat_id``'s tracked dashboard and edit it in place.
 
-    Returns ``True`` when a usable registration remains afterwards — including
-    the "not modified" case, where the dashboard is simply already current.
-    Returns ``False`` when there was nothing registered, or the registration
-    was dropped because the message is permanently gone.
+    Returns an explicit result so callers never confuse a rejected edit with a
+    successful refresh. Temporary failures retain the registration for retry.
 
     Never raises. Callers invoke this *after* committing a task mutation, so an
     exception escaping here would make an add, edit or delete that actually
@@ -226,15 +257,17 @@ async def refresh_deadline_dashboard(
         logger.exception(
             "Unexpected failure refreshing dashboard for chat %s", chat_id
         )
-        return True
+        return DashboardRefreshResult.TRANSIENT_FAILURE
 
 
-async def _refresh_dashboard(application: Application, chat_id: int) -> bool:
+async def _refresh_dashboard(
+    application: Application, chat_id: int
+) -> DashboardRefreshResult:
     """Locked refresh body. See :func:`refresh_deadline_dashboard`."""
     async with _dashboard_lock(chat_id):
         message_id = get_deadline_dashboard_message_id(chat_id)
         if message_id is None:
-            return False
+            return DashboardRefreshResult.NOT_REGISTERED
 
         text, keyboard = render_deadlines(chat_id)
         try:
@@ -245,11 +278,11 @@ async def _refresh_dashboard(application: Application, chat_id: int) -> bool:
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard,
             )
-            return True
+            return DashboardRefreshResult.UPDATED
         except BadRequest as exc:
             if _is_not_modified(exc):
                 # Already showing exactly this. Keep the registration.
-                return True
+                return DashboardRefreshResult.UNCHANGED
             if _is_unrecoverable(exc):
                 logger.info(
                     "Dashboard message %s in chat %s is gone (%s) — "
@@ -259,13 +292,13 @@ async def _refresh_dashboard(application: Application, chat_id: int) -> bool:
                     exc,
                 )
                 delete_deadline_dashboard(chat_id)
-                return False
+                return DashboardRefreshResult.GONE
             # Some other BadRequest (malformed markup, entity problem...).
             # Keep the row so a later refresh can retry.
             logger.warning(
                 "Dashboard refresh rejected for chat %s: %s", chat_id, exc
             )
-            return True
+            return DashboardRefreshResult.TRANSIENT_FAILURE
         except Forbidden as exc:
             logger.warning(
                 "Lost access to chat %s (%s) — dropping dashboard registration",
@@ -273,14 +306,14 @@ async def _refresh_dashboard(application: Application, chat_id: int) -> bool:
                 exc,
             )
             delete_deadline_dashboard(chat_id)
-            return False
+            return DashboardRefreshResult.GONE
         except TelegramError as exc:
             # Timeout, network blip, flood limit: potentially temporary, so the
             # registration stays and the next refresh retries.
             logger.warning(
                 "Transient Telegram error refreshing chat %s: %s", chat_id, exc
             )
-            return True
+            return DashboardRefreshResult.TRANSIENT_FAILURE
 
 
 async def refresh_all_deadline_dashboards(application: Application) -> None:
@@ -296,11 +329,18 @@ async def refresh_all_deadline_dashboards(application: Application) -> None:
         return
 
     refreshed = 0
+    transient_failures = 0
     dropped = 0
     for chat_id, _message_id in registrations:
         try:
-            if await refresh_deadline_dashboard(application, chat_id):
+            outcome = await refresh_deadline_dashboard(application, chat_id)
+            if outcome in (
+                DashboardRefreshResult.UPDATED,
+                DashboardRefreshResult.UNCHANGED,
+            ):
                 refreshed += 1
+            elif outcome is DashboardRefreshResult.TRANSIENT_FAILURE:
+                transient_failures += 1
             else:
                 dropped += 1
         except Exception:
@@ -310,8 +350,10 @@ async def refresh_all_deadline_dashboards(application: Application) -> None:
             logger.exception("Unexpected failure refreshing chat %s", chat_id)
 
     logger.info(
-        "Deadline dashboards refreshed: %d ok, %d unavailable (of %d)",
+        "Deadline dashboards refreshed: %d ok, %d transient failures, "
+        "%d unavailable (of %d)",
         refreshed,
+        transient_failures,
         dropped,
         len(registrations),
     )
@@ -334,6 +376,10 @@ async def send_and_register_dashboard(
 
 
 _DASHBOARD_REFRESHED_MESSAGE: str = "✅ Existing deadline dashboard refreshed."
+_DASHBOARD_REFRESH_FAILED_MESSAGE: str = (
+    "⚠️ Couldn't refresh the existing deadline dashboard right now. "
+    "Please try /deadlines again shortly."
+)
 
 
 @authorized_only
@@ -355,8 +401,16 @@ async def deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_and_register_dashboard(message, chat.id)
         return
 
-    if await refresh_deadline_dashboard(context.application, chat.id):
+    outcome = await refresh_deadline_dashboard(context.application, chat.id)
+    if outcome in (
+        DashboardRefreshResult.UPDATED,
+        DashboardRefreshResult.UNCHANGED,
+    ):
         await message.reply_text(_DASHBOARD_REFRESHED_MESSAGE)
+        return
+
+    if outcome is DashboardRefreshResult.TRANSIENT_FAILURE:
+        await message.reply_text(_DASHBOARD_REFRESH_FAILED_MESSAGE)
         return
 
     # The tracked message was unusable and its row has been dropped; the

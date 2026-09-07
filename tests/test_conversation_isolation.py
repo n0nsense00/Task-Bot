@@ -40,6 +40,12 @@ class ConversationIsolationTests(unittest.TestCase):
         )
         self.auth_patch.start()
         self.addCleanup(self.auth_patch.stop)
+        self.dashboard_patch = patch(
+            "handlers.transient.get_deadline_dashboard_message_id",
+            return_value=None,
+        )
+        self.dashboard_patch.start()
+        self.addCleanup(self.dashboard_patch.stop)
 
     def make_message_update(self, chat_id: int) -> tuple[Mock, Mock]:
         message = Mock()

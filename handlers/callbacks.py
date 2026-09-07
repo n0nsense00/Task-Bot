@@ -49,6 +49,19 @@ from utils.format import (
 
 logger = logging.getLogger(__name__)
 
+_COMPLETED_ANSWER: str = "Deadline completed"
+_DELETED_ANSWER: str = "Deadline deleted"
+
+
+async def _answer_after_mutation(query, text: str) -> None:
+    """Acknowledge a committed mutation without blocking its refresh path."""
+    try:
+        await query.answer(text)
+    except TelegramError as exc:
+        # Callback queries expire quickly. The database change is already
+        # committed, so an expired toast must not prevent the dashboard edit.
+        logger.warning("Could not acknowledge post-mutation callback: %s", exc)
+
 
 @authorized_only
 @safe
@@ -184,7 +197,7 @@ async def done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     mark_complete(task_id, chat.id)
-    await query.answer(f"Marked done: {task.title}")
+    await _answer_after_mutation(query, _COMPLETED_ANSWER)
 
     message_id = query.message.message_id if query.message is not None else None
     if message_id is not None and is_tracked_deadline_dashboard(
@@ -314,7 +327,7 @@ async def delete_confirm_callback(
         return
 
     delete_task(task_id, chat.id)
-    await query.answer(f"Deleted: {task.title}")
+    await _answer_after_mutation(query, _DELETED_ANSWER)
 
     message_id = query.message.message_id if query.message is not None else None
     if message_id is not None and is_tracked_deadline_dashboard(
@@ -325,8 +338,11 @@ async def delete_confirm_callback(
         await refresh_deadline_dashboard(context.application, chat.id)
         return
 
-    await query.edit_message_text(
-        "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        await query.edit_message_text(
+            "🗑️ <b>Deleted</b>\n\n" + format_task_card(task),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError as exc:
+        logger.warning("Could not update the deletion confirmation: %s", exc)
     await refresh_deadline_dashboard(context.application, chat.id)
