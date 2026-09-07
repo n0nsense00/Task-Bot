@@ -30,6 +30,11 @@ class IncomingMessageTrackingAuthorizationTests(unittest.TestCase):
         self.bot._tracked_messages = []
         self.context = Mock()
         self.context.bot = self.bot
+        self.persistence_patch = patch(
+            "utils.tracking_bot.db_store.save_tracked_message"
+        )
+        self.persistence_patch.start()
+        self.addCleanup(self.persistence_patch.stop)
 
     @staticmethod
     def _update(

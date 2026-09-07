@@ -267,7 +267,10 @@ class ClearPersistenceTests(_TrackingTestCase):
         context = self._clear_context()
         update = self._clear_update()
 
-        self._run(basic.track_incoming_message(update, context))
+        # Authorization has its own focused suite; this case isolates the
+        # persistence hand-off performed after that gate.
+        with patch.object(basic, "is_supported_chat", return_value=True):
+            self._run(basic.track_incoming_message(update, context))
 
         self.assertEqual(db.list_tracked_messages(OWNER_CHAT_ID), [])
 
@@ -283,9 +286,16 @@ class ClearPersistenceTests(_TrackingTestCase):
             reply_to_message=None,
             entities=None,
         )
-        update = SimpleNamespace(effective_message=message, effective_chat=chat)
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_chat=chat,
+            effective_user=SimpleNamespace(id=OWNER_CHAT_ID),
+        )
 
-        self._run(basic.track_incoming_message(update, context))
+        # Authorization has its own focused suite; this case isolates the
+        # timestamp persisted after an accepted incoming message.
+        with patch.object(basic, "is_supported_chat", return_value=True):
+            self._run(basic.track_incoming_message(update, context))
 
         self.assertEqual(db.list_tracked_messages(OWNER_CHAT_ID), [(44, sent_at)])
 
