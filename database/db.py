@@ -148,6 +148,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     table_sql = str(table_row[0] or "") if table_row else ""
     if "'quiz'" not in table_sql:
         logger.info("Migrating: expanding task types for deadline tracking")
+        # Copying only live ids must not reset AUTOINCREMENT below ids that
+        # were already deleted: old Telegram buttons can still carry them.
+        sequence_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'"
+        ).fetchone()
+        sequence = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'tasks'"
+        ).fetchone() if sequence_exists else None
+        previous_sequence = int(sequence[0]) if sequence else 0
         conn.execute("ALTER TABLE tasks RENAME TO tasks_legacy")
         conn.execute(
             """CREATE TABLE tasks (
@@ -174,6 +183,20 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                  FROM tasks_legacy"""
         )
         conn.execute("DROP TABLE tasks_legacy")
+        if previous_sequence:
+            current_sequence = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'tasks'"
+            ).fetchone()
+            if current_sequence is None:
+                conn.execute(
+                    "INSERT INTO sqlite_sequence (name, seq) VALUES ('tasks', ?)",
+                    (previous_sequence,),
+                )
+            elif int(current_sequence[0]) < previous_sequence:
+                conn.execute(
+                    "UPDATE sqlite_sequence SET seq = ? WHERE name = 'tasks'",
+                    (previous_sequence,),
+                )
         conn.execute("CREATE INDEX idx_tasks_due_date ON tasks(due_date)")
         conn.execute("CREATE INDEX idx_tasks_type ON tasks(task_type)")
 
@@ -254,6 +277,9 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _get_conn() as conn:
         conn.executescript(_SCHEMA_SQL)
+        # sqlite3 does not implicitly begin transactions for ALTER/CREATE.
+        # A failed table rebuild must roll back its DDL as well as its data.
+        conn.execute("BEGIN")
         _migrate_schema(conn)
     logger.info("Database initialized at %s", DB_PATH)
 
@@ -277,6 +303,7 @@ def add_tasks(tasks: list[Task]) -> list[int]:
         return []
     created_at = datetime.now().isoformat(timespec="seconds")
     ids: list[int] = []
+    assigned_chats: list[int] = []
     with _get_conn() as conn:
         for task in tasks:
             chat_id = (
@@ -299,7 +326,9 @@ def add_tasks(tasks: list[Task]) -> list[int]:
                 ),
             )
             ids.append(int(cur.lastrowid))
-            task.chat_id = chat_id
+            assigned_chats.append(chat_id)
+    for task, chat_id in zip(tasks, assigned_chats):
+        task.chat_id = chat_id
     return ids
 
 
@@ -484,9 +513,17 @@ def get_module(code: str) -> Optional[Module]:
 
 def add_module(module: Module) -> bool:
     """Insert or replace a module row. Returns ``True`` always (no failure mode)."""
-    with _get_conn() as conn:
-        conn.execute(_MODULE_INSERT_SQL, (module.code, module.name))
+    add_modules([module])
     return True
+
+
+def add_modules(modules: list[Module]) -> int:
+    """Insert/replace a module batch atomically; return its input count."""
+    with _get_conn() as conn:
+        conn.executemany(
+            _MODULE_INSERT_SQL, [(module.code, module.name) for module in modules]
+        )
+    return len(modules)
 
 
 def replace_modules(modules: list[Module]) -> int:
@@ -644,11 +681,9 @@ def delete_tracked_messages(chat_id: int, message_ids: list[int]) -> int:
     unique_ids = sorted(set(message_ids))
     if not unique_ids:
         return 0
-    placeholders = ",".join("?" for _ in unique_ids)
     with _get_conn() as conn:
-        cur = conn.execute(
-            f"""DELETE FROM tracked_messages
-                 WHERE chat_id = ? AND message_id IN ({placeholders})""",
-            (chat_id, *unique_ids),
+        cur = conn.executemany(
+            "DELETE FROM tracked_messages WHERE chat_id = ? AND message_id = ?",
+            [(chat_id, message_id) for message_id in unique_ids],
         )
         return cur.rowcount

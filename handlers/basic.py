@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 from telegram import Message, Update
 from telegram.constants import ChatType, MessageEntityType, ParseMode
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from config import CMD_CLEAR
@@ -212,7 +212,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     deleted_ids: set[int] = set()
     gone_ids: set[int] = set()
     forget_ids: set[int] = set(expired_ids)
-    for c, m in to_delete:
+    for index, (c, m) in enumerate(to_delete):
         try:
             await context.bot.delete_message(chat_id=c, message_id=m)
             deleted += 1
@@ -240,7 +240,17 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.warning(
                 "No permission to delete message %s in chat %s: %s", m, c, exc
             )
-        except (NetworkError, RetryAfter) as exc:
+        except RetryAfter as exc:
+            # Telegram has asked us to stop sending deletion requests. Keep
+            # all queued references, including legacy/command ids, for retry.
+            remaining = to_delete[index:]
+            retryable += len(remaining)
+            for pending_chat, pending_id in remaining:
+                if pending_id not in tracked_dates:
+                    save_tracked_message(pending_chat, pending_id)
+            logger.warning("Clear paused by Telegram rate limiting: %s", exc)
+            break
+        except NetworkError as exc:
             # Preserve the row so the next /clear can retry after a transient
             # Telegram/network failure. Legacy dashboards do not yet have a
             # row, so adopt them here for the retry path.
@@ -305,6 +315,9 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         confirmation = await context.bot.send_message(
             chat_id=chat_id, text=text, parse_mode=ParseMode.HTML
         )
+    except TelegramError as exc:
+        logger.warning("Clear finished but its confirmation failed: %s", exc)
+        return
     finally:
         set_skip_tracking(context.bot, False)
 
@@ -380,7 +393,12 @@ def _is_bot_related_message(message: Message, bot_id: int, bot_username: str) ->
         for entity in message.entities:
             if entity.type != MessageEntityType.MENTION:
                 continue
-            mentioned = text[entity.offset : entity.offset + entity.length]
+            # Telegram entity positions count UTF-16 code units. Python
+            # string positions differ after emoji outside the BMP.
+            encoded = text.encode("utf-16-le")
+            mentioned = encoded[
+                entity.offset * 2 : (entity.offset + entity.length) * 2
+            ].decode("utf-16-le")
             if mentioned.lstrip("@").lower() == bot_username.lower():
                 return True
 
@@ -419,7 +437,8 @@ async def track_incoming_message(
     # /clear handles its own command message immediately. The group-1 tracker
     # runs afterwards, so recording it here would resurrect a row for a message
     # that was just deleted.
-    first_token = (message.text or "").split(maxsplit=1)[0].lower()
+    tokens = (message.text or "").split(maxsplit=1)
+    first_token = tokens[0].lower() if tokens else ""
     if first_token.split("@", maxsplit=1)[0] == f"/{CMD_CLEAR}":
         return
 

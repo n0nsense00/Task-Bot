@@ -95,6 +95,7 @@ class CalendarBoundaryTests(unittest.TestCase):
         update = Mock(callback_query=query)
         update.effective_chat = Mock(id=424242)
         context = Mock(user_data={})
+        context.user_data[edit_task._USER_DATA_TASK_ID] = {424242: task.id}
         keyboard = Mock()
 
         with (
@@ -152,6 +153,7 @@ class BriefBookkeepingTests(unittest.TestCase):
 
     def test_send_records_same_local_day_used_to_build_brief(self) -> None:
         application = Mock()
+        application.bot_data = {}
         application.bot.send_message = AsyncMock()
 
         with (
@@ -160,6 +162,7 @@ class BriefBookkeepingTests(unittest.TestCase):
                 scheduler, "build_morning_brief", return_value="brief"
             ) as build,
             patch.object(scheduler, "_record_brief_sent") as record,
+            patch.object(scheduler, "_brief_already_sent_today", return_value=False),
         ):
             asyncio.run(scheduler.send_morning_brief(application))
 

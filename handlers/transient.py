@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from telegram import CallbackQuery, InlineKeyboardMarkup
+from telegram.error import BadRequest
 
 from database.db import get_deadline_dashboard_message_id
 
@@ -39,5 +40,9 @@ async def show_transient_view(
         await message.reply_text(text, **kwargs)
         return True
 
-    await query.edit_message_text(text, **kwargs)
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
     return False

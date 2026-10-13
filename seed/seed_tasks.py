@@ -24,7 +24,6 @@ to the database — partial imports are impossible.
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from database.models import (  # noqa: E402
     TASK_TYPES,
     Task,
 )
+from seed.csv_reader import read_records  # noqa: E402
 from utils.limits import (  # noqa: E402
     MODULE_CODE_MAX_BYTES,
     MODULE_CODE_MAX_LENGTH,
@@ -123,40 +123,10 @@ def _read_rows(path: Path) -> list[_RawRow]:
     ``FileNotFoundError`` or ``ValueError`` with a clear message if the file
     is missing, empty, or has the wrong header.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"CSV not found: {path}")
-
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        raw_lines = f.readlines()
-
-    kept: list[tuple[int, str]] = []
-    for i, line in enumerate(raw_lines, start=1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        kept.append((i, line))
-
-    if not kept:
-        raise ValueError(
-            f"{path} contains no data rows (only comments and blanks)."
-        )
-
-    header_line = kept[0][1]
-    data_entries = kept[1:]
-
-    reader = csv.DictReader([header_line] + [ln for _, ln in data_entries])
-    fieldnames = tuple(reader.fieldnames or ())
-    if fieldnames not in ACCEPTED_COLUMNS:
-        raise ValueError(
-            "CSV header must be one of:\n  "
-            + "\n  ".join(",".join(columns) for columns in ACCEPTED_COLUMNS)
-            + f"\n  got: {reader.fieldnames}"
-        )
-
-    rows: list[_RawRow] = []
-    for (line_no, _), parsed in zip(data_entries, reader):
-        rows.append(_RawRow(line_no=line_no, data=parsed))
-    return rows
+    return [
+        _RawRow(line_no=line_no, data=data)
+        for line_no, data in read_records(path, ACCEPTED_COLUMNS)
+    ]
 
 
 def _validate_row(raw: _RawRow) -> Task:

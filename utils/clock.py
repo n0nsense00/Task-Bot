@@ -28,7 +28,7 @@ def today_local(at: datetime | None = None) -> date:
     """
     try:
         tz = ZoneInfo(TIMEZONE)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         tz = ZoneInfo("Asia/Singapore")
     if at is None:
         return datetime.now(tz).date()

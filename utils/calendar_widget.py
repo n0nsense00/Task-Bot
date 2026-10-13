@@ -47,6 +47,8 @@ def build_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
       Row 7: Today / Tomorrow / +7d / +30d shortcuts
       Row 8: ❌ Cancel
     """
+    if not (1 <= year <= 9999 and 1 <= month <= 12):
+        raise ValueError("Calendar requires a year in 1..9999 and a month in 1..12")
     prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
     next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
     month_name = _calendar.month_name[month]
@@ -55,14 +57,20 @@ def build_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 "◀",
-                callback_data=f"{CB_PREFIX}:nav:{prev_year:04d}-{prev_month:02d}",
+                callback_data=(
+                    f"{CB_PREFIX}:nav:{prev_year:04d}-{prev_month:02d}"
+                    if prev_year >= 1 else NOOP_DATA
+                ),
             ),
             InlineKeyboardButton(
                 f"{month_name} {year}", callback_data=NOOP_DATA
             ),
             InlineKeyboardButton(
                 "▶",
-                callback_data=f"{CB_PREFIX}:nav:{next_year:04d}-{next_month:02d}",
+                callback_data=(
+                    f"{CB_PREFIX}:nav:{next_year:04d}-{next_month:02d}"
+                    if next_year <= 9999 else NOOP_DATA
+                ),
             ),
         ]
     ]
@@ -70,13 +78,23 @@ def build_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     # Use a local Calendar instance (not the module-level setfirstweekday,
     # which would mutate stdlib global state) so weeks start on Monday.
     cal = _calendar.Calendar(firstweekday=_calendar.MONDAY)
-    for week in cal.monthdatescalendar(year, month):
+    # The last calendar week can extend beyond datetime.date's year range.
+    # Render those out-of-range adjacent days as disabled placeholders.
+    days = list(cal.itermonthdays4(year, month))
+    for offset in range(0, len(days), 7):
         row: list[InlineKeyboardButton] = []
-        for day in week:
+        for day_year, day_month, day_number, _weekday in days[offset:offset + 7]:
+            day = (
+                date(day_year, day_month, day_number)
+                if 1 <= day_year <= 9999 else None
+            )
             row.append(
                 InlineKeyboardButton(
-                    str(day.day),
-                    callback_data=f"{CB_PREFIX}:select:{day.isoformat()}",
+                    str(day.day) if day is not None else " ",
+                    callback_data=(
+                        f"{CB_PREFIX}:select:{day.isoformat()}"
+                        if day is not None else NOOP_DATA
+                    ),
                 )
             )
         rows.append(row)
@@ -170,6 +188,9 @@ def parse_year_month(payload: str) -> Optional[tuple[int, int]]:
     """Parse a ``YYYY-MM`` string into ``(year, month)``, or ``None``."""
     try:
         year_str, month_str = payload.split("-", 1)
-        return (int(year_str), int(month_str))
+        year, month = int(year_str), int(month_str)
+        if not (1 <= year <= 9999 and 1 <= month <= 12):
+            return None
+        return (year, month)
     except (TypeError, ValueError):
         return None

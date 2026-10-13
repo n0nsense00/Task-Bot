@@ -27,6 +27,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -63,6 +64,7 @@ from utils.format import (
     TYPE_EMOJI,
     build_module_keyboard,
     build_notes_keyboard,
+    esc,
     format_task_card,
     parse_notes_callback,
 )
@@ -145,11 +147,15 @@ async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
     set_chat_value(update, context, _USER_DATA_KEY, {})
-    await message.reply_text(
-        "📝 <b>New deadline</b>\n\nWhat kind of assessment is it?",
-        parse_mode=ParseMode.HTML,
-        reply_markup=_type_keyboard(),
-    )
+    try:
+        await message.reply_text(
+            "📝 <b>New deadline</b>\n\nWhat kind of assessment is it?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_type_keyboard(),
+        )
+    except TelegramError:
+        _clear_add_state(update, context)
+        raise
     return TYPE
 
 
@@ -233,7 +239,7 @@ async def add_module_picked(
         code = rest[len("select:") :]
         _draft(update, context)["module_code"] = code
         await query.edit_message_text(
-            f"Module: <code>{code}</code>\n\n"
+            f"Module: <code>{esc(code)}</code>\n\n"
             "What's the title? (send the text, or /cancel)",
             parse_mode=ParseMode.HTML,
         )
@@ -268,7 +274,7 @@ async def add_module_text(
         return MODULE_TEXT
     _draft(update, context)["module_code"] = code
     await message.reply_text(
-        f"Module: <code>{code}</code>\n\n"
+        f"Module: <code>{esc(code)}</code>\n\n"
         "What's the title? (send the text, or /cancel)",
         parse_mode=ParseMode.HTML,
     )
@@ -335,7 +341,7 @@ async def add_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             )
         return DATE
 
-    selected: _date | None = None
+    selected = None
     if action == "select" and payload is not None:
         selected = parse_iso_date(payload)
     elif action == "short" and payload is not None:
@@ -477,12 +483,17 @@ async def _finalize_add(
     _clear_add_state(update, context)
     task.id = new_id
     summary = "✅ <b>Added</b>\n\n" + format_task_card(task)
-    if via_query is not None:
-        await via_query.edit_message_text(summary, parse_mode=ParseMode.HTML)
-    else:
-        target = update.effective_message
-        if target is not None:
-            await target.reply_text(summary, parse_mode=ParseMode.HTML)
+    try:
+        if via_query is not None:
+            await via_query.edit_message_text(summary, parse_mode=ParseMode.HTML)
+        else:
+            target = update.effective_message
+            if target is not None:
+                await target.reply_text(summary, parse_mode=ParseMode.HTML)
+    except TelegramError as exc:
+        logger.warning(
+            "Deadline #%s was added but its confirmation failed: %s", new_id, exc
+        )
     # The row is already committed. refresh_deadline_dashboard logs its own
     # failures and never raises, so a dashboard problem cannot make a
     # successful add look like it failed.
@@ -543,8 +554,11 @@ async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Abort /add: drop the in-progress draft, send confirmation reply."""
     message = update.effective_message
     _clear_add_state(update, context)
-    if message is not None:
-        await message.reply_text("Cancelled. Nothing was added.")
+    try:
+        if message is not None:
+            await message.reply_text("Cancelled. Nothing was added.")
+    except TelegramError as exc:
+        logger.warning("Add was cancelled but its confirmation failed: %s", exc)
     return ConversationHandler.END
 
 
