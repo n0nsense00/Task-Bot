@@ -77,11 +77,12 @@ the Telegram `/` suggestion menu.
 
 ### Persistent Dashboard
 
-`/deadlines` does not post a new list each time. The first call in a chat sends
-the dashboard and records its message id in SQLite; from then on that one
-message *is* the dashboard, and everything else edits it in place.
+Every `/deadlines` command sends a fresh upcoming-deadline list at the bottom
+of the chat. Its message id is saved in SQLite as the current dashboard, so
+automatic refreshes and task changes keep the newest list up to date. Older
+lists remain in the chat as snapshots.
 
-It refreshes on three triggers:
+The newest dashboard refreshes on three triggers:
 
 | Trigger | What happens |
 | --- | --- |
@@ -99,15 +100,9 @@ Registrations are per `chat_id`, so the owner's private chat and the group each
 keep their own independent dashboard. The id is persisted, so it survives a
 `systemctl restart`.
 
-Two things worth knowing:
-
-- **The first `/deadlines` after deploying this feature creates the tracked
-  dashboard.** A dashboard posted *before* it cannot be adopted, because
-  Telegram gives bots no way to read arbitrary chat history — so expect one
-  replacement message, after which the same message is reused indefinitely.
-- **Re-running `/deadlines` refreshes the existing dashboard** and replies with
-  a short confirmation rather than a second full list. If the tracked message
-  has been deleted, the stale record is dropped and a replacement is sent.
+The latest successfully sent list becomes the tracked dashboard. If sending
+a new list fails, the existing dashboard registration is retained. A later
+`/deadlines` command always sends a new list, even if an older one was deleted.
 
 Bot-owned messages stay editable indefinitely; the 48-hour Telegram limit
 applies to `/clear` *deletion*, not to edits. If `/clear` does delete the
@@ -120,7 +115,7 @@ new one.
 | --- | --- | --- |
 | `/start` | All | Show the welcome message |
 | `/help` | All | Show command reference |
-| `/deadlines` | All | Create or refresh this chat's persistent deadline dashboard |
+| `/deadlines` | All | Send a fresh list and register it for automatic updates |
 | `/add` | All | Add a deadline through an interactive flow |
 | `/done <id>` | All | Mark a deadline complete |
 | `/delete <id>` | All | Delete a deadline after confirmation |

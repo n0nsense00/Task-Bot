@@ -292,8 +292,8 @@ class InputLimitTests(unittest.IsolatedAsyncioTestCase):
             seed_tasks._validate_row(seed_tasks._RawRow(2, multibyte_data))
 
 
-class RefreshOutcomeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_deadlines_reports_transient_failure_without_false_success(self):
+class DeadlinesCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deadlines_sends_new_list_without_refreshing_old_message(self):
         message = SimpleNamespace(reply_text=AsyncMock())
         update = SimpleNamespace(
             effective_message=message,
@@ -311,20 +311,16 @@ class RefreshOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(
                     return_value=tasks.DashboardRefreshResult.TRANSIENT_FAILURE
                 ),
-            ),
+            ) as refresh_old,
             patch.object(
                 tasks, "send_and_register_dashboard", new_callable=AsyncMock
             ) as send_new,
         ):
             await _original(tasks.deadlines)(update, context)
 
-        message.reply_text.assert_awaited_once_with(
-            tasks._DASHBOARD_REFRESH_FAILED_MESSAGE
-        )
-        self.assertNotEqual(
-            message.reply_text.await_args.args[0], tasks._DASHBOARD_REFRESHED_MESSAGE
-        )
-        send_new.assert_not_awaited()
+        send_new.assert_awaited_once_with(message, CHAT_ID)
+        refresh_old.assert_not_awaited()
+        message.reply_text.assert_not_awaited()
 
 
 if __name__ == "__main__":

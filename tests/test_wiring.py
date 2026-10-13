@@ -2,8 +2,8 @@
 
 Four areas are covered:
 
-A. The ``/deadlines`` lifecycle — first call registers, later calls edit the
-   registered message, a dead registration is replaced.
+A. The ``/deadlines`` lifecycle — every call sends a fresh list and registers
+   it for later updates; a failed send preserves the existing registration.
 B. Mutation paths that MUST push a dashboard refresh.
 C. Paths that must NOT push one.
 D. The scheduler job set, including the fact that the dashboard rollover job
@@ -271,8 +271,8 @@ class DeadlinesLifecycleTests(_WiringTestCase):
             db.list_deadline_dashboards(), [(self.chat_id, sent.message_id)]
         )
 
-    def test_second_call_edits_tracked_message_and_replies_short(self) -> None:
-        """A2: registered -> edit in place, reply with the confirmation only."""
+    def test_registered_dashboard_is_replaced_with_a_fresh_list(self) -> None:
+        """An existing dashboard still produces a full list at the bottom."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 555)
 
@@ -282,29 +282,21 @@ class DeadlinesLifecycleTests(_WiringTestCase):
 
         self.run_handler(tasks_mod.deadlines, update, context)
 
-        edit = context.application.bot.edit_message_text
-        edit.assert_awaited_once()
-        self.assertEqual(edit.await_args.kwargs["chat_id"], self.chat_id)
-        self.assertEqual(edit.await_args.kwargs["message_id"], 555)
-        self.assertIn(DASHBOARD_HEADER, edit.await_args.kwargs["text"])
-
-        # The reply is the short confirmation, NOT a second dashboard.
+        context.application.bot.edit_message_text.assert_not_awaited()
         self.assertEqual(message.reply_text.await_count, 1)
         reply = self.text_of(message.reply_text)
-        self.assertEqual(reply, tasks_mod._DASHBOARD_REFRESHED_MESSAGE)
-        self.assertEqual(reply, "✅ Existing deadline dashboard refreshed.")
-        self.assertNotIn(DASHBOARD_HEADER, reply)
-        self.assertIsNone(
+        self.assertIn(DASHBOARD_HEADER, reply)
+        self.assertIn("Compilers project", reply)
+        self.assertIsNotNone(
             message.reply_text.await_args.kwargs.get("reply_markup")
         )
-
-        # The registration is unchanged — no new message was adopted.
         self.assertEqual(
-            db.get_deadline_dashboard_message_id(self.chat_id), 555
+            db.get_deadline_dashboard_message_id(self.chat_id),
+            self.sent_messages[0].message_id,
         )
 
     def test_stale_registration_is_replaced_and_resaved(self) -> None:
-        """A3: 'message to edit not found' -> send + register a replacement."""
+        """A missing old message cannot prevent sending a fresh list."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 777)
 
@@ -317,15 +309,10 @@ class DeadlinesLifecycleTests(_WiringTestCase):
 
         self.run_handler(tasks_mod.deadlines, update, context)
 
-        edit = context.application.bot.edit_message_text
-        edit.assert_awaited_once()
-        self.assertEqual(edit.await_args.kwargs["message_id"], 777)
-
-        # A replacement dashboard (not the short confirmation) was sent.
+        context.application.bot.edit_message_text.assert_not_awaited()
         self.assertEqual(message.reply_text.await_count, 1)
         body = self.text_of(message.reply_text)
         self.assertIn(DASHBOARD_HEADER, body)
-        self.assertNotEqual(body, tasks_mod._DASHBOARD_REFRESHED_MESSAGE)
 
         # ...and the dead id was swapped out for the new one.
         self.assertEqual(len(self.sent_messages), 1)
@@ -336,30 +323,82 @@ class DeadlinesLifecycleTests(_WiringTestCase):
             sent.message_id,
         )
 
-    def test_not_modified_edit_keeps_registration(self) -> None:
-        """Telegram's benign 'not modified' must not drop the registration."""
+    def test_repeated_commands_send_lists_and_refresh_targets_the_latest(self) -> None:
+        """Every command sends; subsequent automatic edits target the newest."""
+        self.seed_task()
+        context = self.make_context()
+        for _ in range(3):
+            message = self.make_message()
+            self.run_handler(
+                tasks_mod.deadlines, self.make_command_update(message), context
+            )
+            message.reply_text.assert_awaited_once()
+            self.assertIn(DASHBOARD_HEADER, self.text_of(message.reply_text))
+
+        context.application.bot.edit_message_text.assert_not_awaited()
+        self.assertEqual(len(self.sent_messages), 3)
+        ids = [message.message_id for message in self.sent_messages]
+        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(db.list_deadline_dashboards(), [(self.chat_id, ids[-1])])
+        outcome = asyncio.run(
+            tasks_mod.refresh_deadline_dashboard(context.application, self.chat_id)
+        )
+        self.assertIs(outcome, tasks_mod.DashboardRefreshResult.UPDATED)
+        self.assertEqual(
+            context.application.bot.edit_message_text.await_args.kwargs["message_id"],
+            ids[-1],
+        )
+
+    def test_failed_send_keeps_existing_registration(self) -> None:
+        """Sending must succeed before replacing the current dashboard id."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 888)
-
         message = self.make_message()
-        update = self.make_command_update(message)
+        message.reply_text.side_effect = BadRequest("Chat not found")
+        with self.assertRaises(BadRequest):
+            asyncio.run(
+                tasks_mod.send_and_register_dashboard(message, self.chat_id)
+            )
+        self.assertEqual(db.get_deadline_dashboard_message_id(self.chat_id), 888)
+        self.assertEqual(self.sent_messages, [])
+
+    def test_old_refresh_failure_cannot_remove_new_registration(self) -> None:
+        """Replacing a list during a failed refresh keeps the new list live."""
+        self.seed_task()
+        db.save_deadline_dashboard(self.chat_id, 777)
+        message = self.make_message()
         context = self.make_context()
-        context.application.bot.edit_message_text = AsyncMock(
-            side_effect=BadRequest("Message is not modified")
-        )
 
-        self.run_handler(tasks_mod.deadlines, update, context)
+        async def scenario():
+            edit_started = asyncio.Event()
+            release_edit = asyncio.Event()
 
+            async def edit_old(**kwargs):
+                edit_started.set()
+                await release_edit.wait()
+                raise BadRequest("Message to edit not found")
+
+            context.application.bot.edit_message_text.side_effect = edit_old
+            old_refresh = asyncio.create_task(
+                tasks_mod.refresh_deadline_dashboard(
+                    context.application, self.chat_id
+                )
+            )
+            await edit_started.wait()
+            send_new = asyncio.create_task(
+                tasks_mod.send_and_register_dashboard(message, self.chat_id)
+            )
+            await asyncio.sleep(0)
+            release_edit.set()
+            return await asyncio.gather(old_refresh, send_new)
+
+        outcomes = asyncio.run(scenario())
+        self.assertIs(outcomes[0], tasks_mod.DashboardRefreshResult.GONE)
+        message.reply_text.assert_awaited_once()
         self.assertEqual(
-            self.text_of(message.reply_text),
-            tasks_mod._DASHBOARD_REFRESHED_MESSAGE,
+            db.get_deadline_dashboard_message_id(self.chat_id),
+            self.sent_messages[0].message_id,
         )
-        self.assertEqual(
-            db.get_deadline_dashboard_message_id(self.chat_id), 888
-        )
-        # No replacement dashboard was posted.
-        self.assertEqual(len(self.sent_messages), 1)
-        self.assertNotIn(DASHBOARD_HEADER, self.sent_messages[0].text)
 
 
 # ---------------------------------------------------------------------------
