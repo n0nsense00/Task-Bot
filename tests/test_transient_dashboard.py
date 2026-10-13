@@ -183,7 +183,7 @@ class TransientDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_updates_transient_card_and_refreshes_dashboard(self) -> None:
         """A completed edit writes to the two messages through separate paths."""
         context = self.make_context()
-        context.user_data["edit_task_id"] = self.task_id
+        context.user_data[edit_task._USER_DATA_TASK_ID] = {self.chat_id: self.task_id}
         update, query = self.make_update(
             f"edittype:quiz:{self.task_id}", self.manager_id
         )

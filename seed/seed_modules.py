@@ -12,7 +12,6 @@ contract — atomic on failure, line-numbered errors point to the source CSV.
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,12 +21,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from database.db import (  # noqa: E402
-    add_module,
+    add_modules,
     count_modules,
     init_db,
     replace_modules,
 )
 from database.models import Module  # noqa: E402
+from seed.csv_reader import read_records  # noqa: E402
 from utils.limits import (  # noqa: E402
     MODULE_CODE_MAX_BYTES,
     MODULE_CODE_MAX_LENGTH,
@@ -53,39 +53,10 @@ def _read_rows(path: Path) -> list[_RawRow]:
     UTF-8-sig encoding strips any BOM Excel might inject; same defensive
     handling as seed_tasks.py.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"CSV not found: {path}")
-
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        raw_lines = f.readlines()
-
-    kept: list[tuple[int, str]] = []
-    for i, line in enumerate(raw_lines, start=1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        kept.append((i, line))
-
-    if not kept:
-        raise ValueError(
-            f"{path} contains no data rows (only comments and blanks)."
-        )
-
-    header_line = kept[0][1]
-    data_entries = kept[1:]
-
-    reader = csv.DictReader([header_line] + [ln for _, ln in data_entries])
-    if tuple(reader.fieldnames or ()) != EXPECTED_COLUMNS:
-        raise ValueError(
-            "CSV header must be exactly: "
-            + ",".join(EXPECTED_COLUMNS)
-            + f"\n  got: {reader.fieldnames}"
-        )
-
-    rows: list[_RawRow] = []
-    for (line_no, _), parsed in zip(data_entries, reader):
-        rows.append(_RawRow(line_no=line_no, data=parsed))
-    return rows
+    return [
+        _RawRow(line_no=line_no, data=data)
+        for line_no, data in read_records(path, (EXPECTED_COLUMNS,))
+    ]
 
 
 def _validate_row(raw: _RawRow) -> Module:
@@ -171,8 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         replace_modules(modules)
         print(f"Replaced {existing} existing module(s) atomically.")
     else:
-        for module in modules:
-            add_module(module)
+        add_modules(modules)
 
     print(f"Imported {len(modules)} module(s).")
     return 0

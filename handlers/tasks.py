@@ -423,10 +423,15 @@ async def done_task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     mark_complete(task_id, chat.id)
     task.completed = True
-    await message.reply_text(
-        "✅ <b>Completed</b>\n\n" + format_task_card(task),
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        await message.reply_text(
+            "✅ <b>Completed</b>\n\n" + format_task_card(task),
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError as exc:
+        logger.warning(
+            "Deadline #%s was completed but its confirmation failed: %s", task_id, exc
+        )
     # The completion is already committed; a dashboard refresh failure is
     # logged inside the helper and must not surface as a failed /done.
     await refresh_deadline_dashboard(context.application, chat.id)

@@ -26,6 +26,7 @@ import logging
 
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -102,6 +103,9 @@ EDIT_NOTES = 208
 _CLEAR_KEYWORD: str = "clear"
 _USER_DATA_TASK_ID: str = "edit_task_ids"
 _FLOW_NAME: str = "edit"
+_STALE_EDIT_MESSAGE: str = (
+    "That button belongs to a different edit. Use the current editor."
+)
 
 
 def _draft_task_id(
@@ -153,16 +157,25 @@ async def _finish_edit_text(
     The Updated card stays a separate reply because the user typed into the
     chat; the persistent dashboard is refreshed alongside it.
     """
-    update_task(task)
+    stored = update_task(task)
+    _abort(update, context)
+    summary = (
+        _updated_summary(task) if stored else "Task no longer exists. Edit cancelled."
+    )
     message = update.effective_message
-    if message is not None:
-        await message.reply_text(
-            _updated_summary(task), parse_mode=ParseMode.HTML
+    try:
+        if message is not None:
+            await message.reply_text(
+                summary, parse_mode=ParseMode.HTML
+            )
+    except TelegramError as exc:
+        logger.warning(
+            "Could not deliver the edit result for deadline #%s: %s", task.id, exc
         )
     chat = update.effective_chat
     if chat is not None:
         await refresh_deadline_dashboard(context.application, chat.id)
-    return _abort(update, context)
+    return ConversationHandler.END
 
 
 async def _finish_edit_callback(
@@ -177,20 +190,29 @@ async def _finish_edit_callback(
     Callers have already answered the callback query, so no toast is raised
     here — answering the same query twice is an error.
     """
-    update_task(task)
+    stored = update_task(task)
+    _abort(update, context)
+    summary = (
+        _updated_summary(task) if stored else "Task no longer exists. Edit cancelled."
+    )
     query = update.callback_query
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
-    if query is not None and chat_id is not None:
-        await show_transient_view(
-            query,
-            chat_id,
-            _updated_summary(task),
-            parse_mode=ParseMode.HTML,
+    try:
+        if query is not None and chat_id is not None:
+            await show_transient_view(
+                query,
+                chat_id,
+                summary,
+                parse_mode=ParseMode.HTML,
+            )
+    except TelegramError as exc:
+        logger.warning(
+            "Could not deliver the edit result for deadline #%s: %s", task.id, exc
         )
     if chat_id is not None:
         await refresh_deadline_dashboard(context.application, chat_id)
-    return _abort(update, context)
+    return ConversationHandler.END
 
 
 @authorized_only
@@ -209,11 +231,13 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         task_id = int(parts[1])
     except ValueError:
+        await query.answer("Invalid task id", show_alert=True)
         await show_transient_view(query, chat.id, "Invalid task id.")
         return ConversationHandler.END
 
     task = get_task(task_id, chat.id)
     if task is None:
+        await query.answer("Task no longer exists", show_alert=True)
         await show_transient_view(
             query, chat.id, f"Task #{task_id} not found."
         )
@@ -227,20 +251,24 @@ async def edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
 
-    await query.answer()
-    set_chat_value(update, context, _USER_DATA_TASK_ID, task_id)
-    body = (
-        f"✏️ <b>Editing task</b> <code>#{task_id}</code>\n\n"
-        + format_task_card(task)
-        + "\n\nWhich field?"
-    )
-    await show_transient_view(
-        query,
-        chat.id,
-        body,
-        parse_mode=ParseMode.HTML,
-        reply_markup=build_edit_field_keyboard(task_id),
-    )
+    try:
+        await query.answer()
+        set_chat_value(update, context, _USER_DATA_TASK_ID, task_id)
+        body = (
+            f"✏️ <b>Editing task</b> <code>#{task_id}</code>\n\n"
+            + format_task_card(task)
+            + "\n\nWhich field?"
+        )
+        await show_transient_view(
+            query,
+            chat.id,
+            body,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_edit_field_keyboard(task_id),
+        )
+    except TelegramError:
+        _abort(update, context)
+        raise
     return EDIT_PICK_FIELD
 
 
@@ -254,8 +282,6 @@ async def edit_field_picked(
     chat = update.effective_chat
     if query is None or query.data is None or chat is None:
         return EDIT_PICK_FIELD
-    await query.answer()
-
     parts = query.data.split(":", 2)
     if len(parts) != 3 or parts[0] != CB_EDIT_FIELD:
         return EDIT_PICK_FIELD
@@ -267,7 +293,10 @@ async def edit_field_picked(
         await query.edit_message_text("Invalid task id.")
         return _abort(update, context)
 
-    set_chat_value(update, context, _USER_DATA_TASK_ID, task_id)
+    if task_id != _draft_task_id(update, context):
+        await query.answer(_STALE_EDIT_MESSAGE, show_alert=True)
+        return EDIT_PICK_FIELD
+    await query.answer()
     task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text(f"Task #{task_id} no longer exists.")
@@ -377,8 +406,6 @@ async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat = update.effective_chat
     if query is None or query.data is None or chat is None:
         return EDIT_TYPE
-    await query.answer()
-
     parts = query.data.split(":", 2)
     if len(parts) != 3 or parts[0] != CB_EDIT_TYPE_VALUE:
         await query.edit_message_text("Invalid selection. Edit cancelled.")
@@ -393,6 +420,10 @@ async def edit_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.edit_message_text("Invalid task id. Edit cancelled.")
         return _abort(update, context)
 
+    if task_id != _draft_task_id(update, context):
+        await query.answer(_STALE_EDIT_MESSAGE, show_alert=True)
+        return EDIT_TYPE
+    await query.answer()
     task = get_task(task_id, chat.id)
     if task is None:
         await query.edit_message_text("Task no longer exists. Edit cancelled.")
@@ -502,7 +533,7 @@ async def edit_due(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             )
         return EDIT_DUE
 
-    selected: _date | None = None
+    selected = None
     if action == "select" and payload is not None:
         selected = parse_iso_date(payload)
     elif action == "short" and payload is not None:
@@ -649,17 +680,26 @@ async def edit_notes_callback(
 @safe
 async def edit_cancel_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
+) -> int | None:
     """Handle 'editcancel:N' tap: abort, edit message to confirmation."""
     query = update.callback_query
-    if query is None:
+    if query is None or query.data is None:
         return ConversationHandler.END
-    await query.answer("Cancelled")
     try:
+        task_id = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer("Invalid edit button", show_alert=True)
+        return None
+    if task_id != _draft_task_id(update, context):
+        await query.answer(_STALE_EDIT_MESSAGE, show_alert=True)
+        return None
+    _abort(update, context)
+    try:
+        await query.answer("Cancelled")
         await query.edit_message_text("Edit cancelled. No changes made.")
-    except Exception:
-        logger.exception("Failed to edit message after edit cancel")
-    return _abort(update, context)
+    except TelegramError as exc:
+        logger.warning("Edit was cancelled but its confirmation failed: %s", exc)
+    return ConversationHandler.END
 
 
 @authorized_only
@@ -669,9 +709,13 @@ async def edit_cancel_command(
 ) -> int:
     """Handle /cancel during the edit flow: abort, send confirmation reply."""
     message = update.effective_message
-    if message is not None:
-        await message.reply_text("Edit cancelled. No changes made.")
-    return _abort(update, context)
+    _abort(update, context)
+    try:
+        if message is not None:
+            await message.reply_text("Edit cancelled. No changes made.")
+    except TelegramError as exc:
+        logger.warning("Edit was cancelled but its confirmation failed: %s", exc)
+    return ConversationHandler.END
 
 
 def build_edit_conversation() -> ConversationHandler:

@@ -67,7 +67,10 @@ Rules:
 | `due_time` | no | blank, or `HH:MM` 24-hour time |
 | `notes` | no | at most 500 characters, or blank |
 
-Lines starting with `#` are comments and skipped. Blank lines are skipped.
+Lines starting with `#` and blank lines between records are skipped. Quoted
+fields may contain newlines, including blank lines and lines starting with `#`;
+those are preserved as part of the field. Rows must have exactly the header's
+number of fields; quote values containing commas or newlines.
 Titles containing commas must be quoted, for example:
 
 ```csv

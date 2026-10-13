@@ -19,6 +19,7 @@ date is persisted to ``data/last_brief.txt`` so the check survives restarts.
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -59,6 +60,7 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent
 _LAST_BRIEF_FILE: Path = _PROJECT_ROOT / "data" / "last_brief.txt"
 
 _JOB_ID: str = "morning_brief"
+_BRIEF_SEND_LOCK_KEY: str = "morning_brief_send_lock"
 # Shortly after local midnight: late enough that the date has definitely
 # rolled over, early enough that a countdown is corrected before anyone reads
 # it. Runs regardless of MORNING_BRIEF_ENABLED — that flag governs only the
@@ -80,7 +82,7 @@ def _resolve_timezone() -> ZoneInfo:
     """Return the configured timezone, falling back to Asia/Singapore on error."""
     try:
         return ZoneInfo(TIMEZONE)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         logger.warning(
             "Invalid TIMEZONE %r — falling back to Asia/Singapore", TIMEZONE
         )
@@ -222,15 +224,20 @@ async def send_morning_brief(application: Application) -> None:
     can't crash the scheduler.
     """
     try:
-        local_day = today_local()
-        text = build_morning_brief(MY_TELEGRAM_ID, today=local_day)
-        await application.bot.send_message(
-            chat_id=MY_TELEGRAM_ID,
-            text=text,
-            parse_mode=ParseMode.HTML,
-        )
-        _record_brief_sent(local_day)
-        logger.info("Morning brief sent")
+        lock = application.bot_data.setdefault(_BRIEF_SEND_LOCK_KEY, asyncio.Lock())
+        async with lock:
+            local_day = today_local()
+            if _brief_already_sent_today(local_day):
+                logger.info("Today's morning brief is already sent; skipping duplicate.")
+                return
+            text = build_morning_brief(MY_TELEGRAM_ID, today=local_day)
+            await application.bot.send_message(
+                chat_id=MY_TELEGRAM_ID,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+            _record_brief_sent(local_day)
+            logger.info("Morning brief sent")
     except Exception:
         logger.exception("Morning brief job failed")
 
