@@ -4,10 +4,10 @@ The bot is intentionally assessment-focused. Timetable views such as /today
 and /week are not registered; the primary view is one chronological list of
 pending semester deadlines.
 
-Each chat keeps ONE persistent dashboard message. /deadlines registers it in
-SQLite (:func:`database.db.save_deadline_dashboard`); afterwards every
-mutation and the daily post-midnight job edit that same message in place via
-:func:`refresh_deadline_dashboard` rather than sending a fresh list. The
+Every /deadlines sends a fresh list and registers it as the chat's current
+dashboard in SQLite (:func:`database.db.save_deadline_dashboard`). Mutations
+and the daily post-midnight job update the latest registered message via
+:func:`refresh_deadline_dashboard`. Older lists remain chat history. The
 registration is chat-scoped, so the owner's DM and the allowed group each
 track their own dashboard.
 """
@@ -363,11 +363,14 @@ async def send_and_register_dashboard(
     message: Message, chat_id: int
 ) -> None:
     """Send a fresh dashboard as a reply and register it as the live one."""
-    text, keyboard = render_deadlines(chat_id)
-    sent = await message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=keyboard
-    )
-    save_deadline_dashboard(chat_id=sent.chat_id, message_id=sent.message_id)
+    # Serialize replacement with scheduled/mutation refreshes. A refresh of
+    # the old message must finish before the new registration is installed.
+    async with _dashboard_lock(chat_id):
+        text, keyboard = render_deadlines(chat_id)
+        sent = await message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=keyboard
+        )
+        save_deadline_dashboard(chat_id=sent.chat_id, message_id=sent.message_id)
     logger.info(
         "Registered dashboard message %s for chat %s",
         sent.message_id,
@@ -375,46 +378,19 @@ async def send_and_register_dashboard(
     )
 
 
-_DASHBOARD_REFRESHED_MESSAGE: str = "✅ Existing deadline dashboard refreshed."
-_DASHBOARD_REFRESH_FAILED_MESSAGE: str = (
-    "⚠️ Couldn't refresh the existing deadline dashboard right now. "
-    "Please try /deadlines again shortly."
-)
-
-
 @authorized_only
 @safe
 async def deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show or refresh this chat's one persistent deadline dashboard.
+    """Reply with a fresh list and make it this chat's current dashboard.
 
-    First call in a chat sends the dashboard and registers it. Later calls
-    edit that same message and reply with a short confirmation instead of
-    posting a second full list. If the registered message has since been
-    deleted, the registration is dropped and a replacement is sent.
+    Each explicit command sends the list at the bottom of the chat. Automatic
+    refreshes continue updating the latest successfully sent list in place.
     """
     message = update.effective_message
     chat = update.effective_chat
     if message is None or chat is None:
         return
 
-    if get_deadline_dashboard_message_id(chat.id) is None:
-        await send_and_register_dashboard(message, chat.id)
-        return
-
-    outcome = await refresh_deadline_dashboard(context.application, chat.id)
-    if outcome in (
-        DashboardRefreshResult.UPDATED,
-        DashboardRefreshResult.UNCHANGED,
-    ):
-        await message.reply_text(_DASHBOARD_REFRESHED_MESSAGE)
-        return
-
-    if outcome is DashboardRefreshResult.TRANSIENT_FAILURE:
-        await message.reply_text(_DASHBOARD_REFRESH_FAILED_MESSAGE)
-        return
-
-    # The tracked message was unusable and its row has been dropped; the
-    # command is an explicit user request, so send a replacement now.
     await send_and_register_dashboard(message, chat.id)
 
 
