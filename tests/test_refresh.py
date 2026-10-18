@@ -260,19 +260,21 @@ class TestRefreshPayload(_RefreshTestBase):
             reply_markup=None,
         )
 
-    async def test_reregistration_targets_the_newest_message(self) -> None:
+    async def test_registering_a_new_list_keeps_the_old_list_refreshing(self) -> None:
         self.add_deadline(CHAT_A)
         self.register(CHAT_A, MSG_A)
         self.register(CHAT_A, MSG_A + 77)
         application = self.make_application()
 
-        await self.refresh(application, CHAT_A)
+        with patch("handlers.tasks.asyncio.sleep", new_callable=AsyncMock) as pause:
+            await self.refresh(application, CHAT_A)
+        pause.assert_awaited_once_with(3.1)
 
         self.assertEqual(
-            application.bot.edit_message_text.await_args.kwargs["message_id"],
-            MSG_A + 77,
+            [call.kwargs["message_id"] for call in application.bot.edit_message_text.await_args_list],
+            [MSG_A, MSG_A + 77],
         )
-        self.assertEqual(len(db.list_deadline_dashboards()), 1)
+        self.assertEqual(len(db.list_deadline_dashboards()), 2)
 
 
 class TestRefreshWithoutRegistration(_RefreshTestBase):

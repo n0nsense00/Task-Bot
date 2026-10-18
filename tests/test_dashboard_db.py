@@ -154,8 +154,9 @@ class TestSchemaCreation(DashboardDBTestCase):
         info = self.query("PRAGMA table_info(deadline_dashboards)")
         columns = {row["name"]: row for row in info}
         self.assertEqual(set(columns), {"chat_id", "message_id", "updated_at"})
-        # chat_id is the primary key: one dashboard per chat, enforced by SQLite.
+        # The composite key retains each list and deduplicates repeat saves.
         self.assertEqual(columns["chat_id"]["pk"], 1)
+        self.assertEqual(columns["message_id"]["pk"], 2)
         self.assertEqual(columns["message_id"]["notnull"], 1)
         self.assertEqual(columns["updated_at"]["notnull"], 1)
 
@@ -210,23 +211,23 @@ class TestSaveAndRead(DashboardDBTestCase):
         # Must parse: the column is documented as an ISO-8601 string.
         datetime.fromisoformat(str(updated_at))
 
-    def test_resaving_same_chat_replaces_message_id(self) -> None:
+    def test_saving_another_list_retains_the_previous_message_id(self) -> None:
         db.save_deadline_dashboard(OWNER_CHAT_ID, 555)
         db.save_deadline_dashboard(OWNER_CHAT_ID, 777)
 
         self.assertEqual(db.get_deadline_dashboard_message_id(OWNER_CHAT_ID), 777)
         self.assertEqual(
             self.dashboard_row_count(OWNER_CHAT_ID),
-            1,
-            "re-registering a dashboard must upsert, not accumulate rows",
+            2,
+            "a new dashboard must retain older list registrations",
         )
-        self.assertEqual(self.dashboard_row_count(), 1)
-        self.assertEqual(db.list_deadline_dashboards(), [(OWNER_CHAT_ID, 777)])
+        self.assertEqual(self.dashboard_row_count(), 2)
+        self.assertEqual(db.list_deadline_dashboards(), [(OWNER_CHAT_ID, 555), (OWNER_CHAT_ID, 777)])
 
-    def test_many_resaves_keep_exactly_one_row(self) -> None:
+    def test_many_lists_keep_one_row_per_message(self) -> None:
         for message_id in range(100, 110):
             db.save_deadline_dashboard(GROUP_CHAT_ID, message_id)
-        self.assertEqual(self.dashboard_row_count(), 1)
+        self.assertEqual(self.dashboard_row_count(), 10)
         self.assertEqual(db.get_deadline_dashboard_message_id(GROUP_CHAT_ID), 109)
 
     def test_resaving_same_message_id_is_a_noop(self) -> None:
@@ -255,7 +256,7 @@ class TestMultipleChats(DashboardDBTestCase):
         db.save_deadline_dashboard(OWNER_CHAT_ID, 33)
         self.assertEqual(db.get_deadline_dashboard_message_id(OWNER_CHAT_ID), 33)
         self.assertEqual(db.get_deadline_dashboard_message_id(GROUP_CHAT_ID), 22)
-        self.assertEqual(self.dashboard_row_count(), 2)
+        self.assertEqual(self.dashboard_row_count(), 3)
 
     def test_list_returns_both_chats(self) -> None:
         listed = db.list_deadline_dashboards()

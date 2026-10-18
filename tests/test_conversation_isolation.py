@@ -41,8 +41,8 @@ class ConversationIsolationTests(unittest.TestCase):
         self.auth_patch.start()
         self.addCleanup(self.auth_patch.stop)
         self.dashboard_patch = patch(
-            "handlers.transient.get_deadline_dashboard_message_id",
-            return_value=None,
+            "handlers.transient.has_deadline_dashboard",
+            return_value=False,
         )
         self.dashboard_patch.start()
         self.addCleanup(self.dashboard_patch.stop)
