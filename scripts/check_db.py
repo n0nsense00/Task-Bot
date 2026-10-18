@@ -146,17 +146,17 @@ def run_check() -> None:
         assert db.delete_task(old_midterm_id, personal_chat_id)
         assert db.count_tasks() == 0
 
-        # Persistent /deadlines dashboards: one tracked message id per chat.
+        # Persistent /deadlines dashboards: retain every list per chat.
         assert db.list_deadline_dashboards() == []
         assert db.get_deadline_dashboard_message_id(personal_chat_id) is None
 
         db.save_deadline_dashboard(personal_chat_id, 5001)
         assert db.get_deadline_dashboard_message_id(personal_chat_id) == 5001
 
-        # Re-saving the same chat replaces the id instead of adding a row.
+        # A new list retains the older list's countdown registration.
         db.save_deadline_dashboard(personal_chat_id, 5002)
         assert db.get_deadline_dashboard_message_id(personal_chat_id) == 5002
-        assert db.list_deadline_dashboards() == [(personal_chat_id, 5002)]
+        assert db.list_deadline_dashboards() == [(personal_chat_id, 5001), (personal_chat_id, 5002)]
 
         # A second chat tracks its own dashboard independently.
         db.save_deadline_dashboard(group_chat_id, 6001)
@@ -165,6 +165,7 @@ def run_check() -> None:
         dashboards = db.list_deadline_dashboards()
         assert sorted(dashboards) == [
             (group_chat_id, 6001),
+            (personal_chat_id, 5001),
             (personal_chat_id, 5002),
         ]
 

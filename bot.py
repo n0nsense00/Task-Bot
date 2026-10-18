@@ -14,6 +14,8 @@ signal wiring.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+import re
 import subprocess
 
 from telegram import BotCommand
@@ -91,11 +93,13 @@ def _configure_logging() -> None:
 def _get_build_identifier() -> str:
     """Return a short identifier for the running build, for startup logs.
 
-    Order of precedence:
-      1. Local ``git rev-parse --short HEAD`` if a git repo is available. The
-         EC2 host deploys by ``git pull``, so the checkout is always present.
-      2. The string ``'unknown'`` — should never hit in normal dev/deploy.
+    Release archives carry a commit marker; local checkouts use Git.
     """
+    marker = Path(__file__).resolve().parent / '.build-revision'
+    if marker.is_file():
+        commit = marker.read_text().strip()
+        if re.fullmatch(r'[0-9a-f]{40}', commit):
+            return commit[:7]
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],

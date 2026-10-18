@@ -1,0 +1,11 @@
+{
+  "root": "/home/ubuntu/task-bot-deploy",
+  "shared": "/home/ubuntu/task-bot",
+  "database": "/home/ubuntu/task-bot/data/tasks.db",
+  "repository": "https://github.com/n0nsense00/Task-Bot.git",
+  "service": "task-bot",
+  "python": "/usr/bin/python3",
+  "health_timeout": 180,
+  "keep_releases": 3,
+  "keep_backups": 14
+}
