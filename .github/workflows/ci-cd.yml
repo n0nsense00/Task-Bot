@@ -1,0 +1,80 @@
+name: CI and CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    env:
+      TELEGRAM_BOT_TOKEN: '123456:dummy-token-for-tests'
+      MY_TELEGRAM_ID: '424242'
+      ALLOWED_CHAT_ID: '-1009876543210'
+      TIMEZONE: Asia/Singapore
+      MORNING_BRIEF_ENABLED: 'false'
+      TASK_BOT_DB_PATH: /tmp/task-bot-tests.db
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Compile application and deployment code
+        run: python -m compileall -q bot.py config.py scheduler.py database handlers utils seed scripts deploy
+      - name: Run regression and rollback tests
+        run: python -m unittest discover -s tests -v
+      - name: Check database operations
+        run: python scripts/check_db.py
+
+  deploy:
+    name: Deploy to EC2
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: task-bot-production
+      cancel-in-progress: false
+    steps:
+      - name: Deploy tested commit and verify startup
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_KNOWN_HOSTS: ${{ vars.EC2_KNOWN_HOSTS }}
+          EC2_DEPLOY_KEY: ${{ secrets.EC2_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${EC2_HOST:?EC2_HOST is required}"
+          : "${EC2_USER:?EC2_USER is required}"
+          : "${EC2_KNOWN_HOSTS:?EC2_KNOWN_HOSTS is required}"
+          : "${EC2_DEPLOY_KEY:?EC2_DEPLOY_KEY is required}"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          key="$RUNNER_TEMP/task-bot-deploy-key"
+          known_hosts="$RUNNER_TEMP/task-bot-known-hosts"
+          trap 'rm -f -- "$key" "$known_hosts"' EXIT
+          umask 077
+          printf '%s\n' "$EC2_DEPLOY_KEY" > "$key"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$known_hosts"
+          ssh -T -i "$key" \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+            "$EC2_USER@$EC2_HOST" "deploy $GITHUB_SHA"

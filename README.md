@@ -270,9 +270,12 @@ journalctl -u task-bot -f          # follow logs
 journalctl -u task-bot -n 100      # last 100 lines
 ```
 
-Deploying a change is `git pull && sudo systemctl restart task-bot`. The unit
-sets `PYTHONUNBUFFERED=1`, so log lines reach journald immediately instead of
-sitting in a stdio buffer.
+GitHub Actions runs the tests on Python 3.12 and 3.13 for every PR. Passing changes
+merged into `main` deploy to EC2 with a database backup, startup checks, and
+automatic recovery to the previous code, venv, and database if activation fails.
+The service runs the release selected by `/home/ubuntu/task-bot-deploy/current`.
+Daily database backups run at 03:00 Singapore time. See
+[deployment setup and recovery](deploy/README.md) for configuration and operations.
 
 `data/` sits on the instance's EBS volume and persists across restarts and
 redeploys with no extra configuration — unlike an ephemeral container
@@ -308,7 +311,6 @@ check from outside. Liveness is confirmed three ways:
 
 ## Next Improvements
 
-- Add GitHub Actions for `scripts/check_db.py` and import validation.
 - Add focused unit tests around formatter and callback parser helpers.
 - Add a small architecture diagram image for the README.
 - Add a short demo recording or screenshots before pinning the repo publicly.

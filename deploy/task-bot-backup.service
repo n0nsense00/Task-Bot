@@ -1,0 +1,12 @@
+[Unit]
+Description=Verified daily SQLite backup for Task-Bot
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/task-bot/deploy.py backup
+Restart=on-failure
+RestartSec=300
+TimeoutStartSec=120

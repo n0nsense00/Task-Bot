@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up Task-Bot daily at 03:00 Singapore time
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Singapore
+Persistent=true
+Unit=task-bot-backup.service
+
+[Install]
+WantedBy=timers.target
