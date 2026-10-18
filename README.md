@@ -15,7 +15,7 @@ the repo easy to run and review.
 - Track quizzes, labs, assignments, projects, midterms, finals, and other items.
 - Store module codes, titles, due dates, optional due times, and notes.
 - View every pending deadline in one chronological list, soonest first.
-- Keep one live dashboard per chat that updates itself as the date rolls over.
+- Keep every deadline list up to date as the date rolls over.
 - Complete, edit, or delete deadlines from Telegram inline buttons.
 - Automatically keep personal-chat and group-chat deadlines separate.
 - Serve a shared study group while restricting the bot to one configured chat.
@@ -78,17 +78,16 @@ the Telegram `/` suggestion menu.
 ### Persistent Dashboard
 
 Every `/deadlines` command sends a fresh upcoming-deadline list at the bottom
-of the chat. Its message id is saved in SQLite as the current dashboard, so
-automatic refreshes and task changes keep the newest list up to date. Older
-lists remain in the chat as snapshots.
+of the chat. Every list's message id is retained in SQLite, so automatic
+refreshes and task changes keep older lists up to date too.
 
-The newest dashboard refreshes on three triggers:
+All registered lists refresh on three triggers:
 
 | Trigger | What happens |
 | --- | --- |
 | Just after local midnight (00:06 in `TIMEZONE`) | Countdowns roll over — `34 days away` becomes `33 days away`, and deadlines that have passed drop off |
-| Any add, complete, edit, or delete | The dashboard updates immediately |
-| Bot startup | Catches up a dashboard that went stale while the process was down |
+| Any add, complete, edit, or delete | Lists refresh to reflect the change |
+| Bot startup | Catches up lists that went stale while the process was down |
 
 The midnight job runs regardless of `MORNING_BRIEF_ENABLED` — that flag governs
 only the morning push. `TIMEZONE` now drives both.
@@ -97,17 +96,17 @@ Deadlines that fall into the past are **not deleted**. They stay in SQLite and
 simply stop being rendered once the local date moves past them.
 
 Registrations are per `chat_id`, so the owner's private chat and the group each
-keep their own independent dashboard. The id is persisted, so it survives a
+keep their own independent lists. Message ids are persisted, so they survive a
 `systemctl restart`.
 
-The latest successfully sent list becomes the tracked dashboard. If sending
-a new list fails, the existing dashboard registration is retained. A later
+Each successfully sent list is added to the refresh tracker. If sending
+a new list fails, existing registrations are retained. A later
 `/deadlines` command always sends a new list, even if an older one was deleted.
 
 Bot-owned messages stay editable indefinitely; the 48-hour Telegram limit
 applies to `/clear` *deletion*, not to edits. If `/clear` does delete the
-dashboard, its registration is dropped and the next `/deadlines` registers a
-new one.
+list, only that message's registration is dropped. Refresh batches are paced
+to avoid bursts of edits; temporary failures retain registrations for retry.
 
 ## Commands
 

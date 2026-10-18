@@ -183,6 +183,23 @@ class TrackingBotTests(_TrackingTestCase):
 
 
 class ClearPersistenceTests(_TrackingTestCase):
+    def test_clear_forgets_deleted_lists_but_retains_older_editable_lists(self) -> None:
+        old = datetime.now(timezone.utc) - timedelta(hours=49)
+        db.save_tracked_message(OWNER_CHAT_ID, 10, old)
+        for message_id in (10, 20, 30):
+            db.save_deadline_dashboard(OWNER_CHAT_ID, message_id)
+        other_chat = -100_123
+        db.save_deadline_dashboard(other_chat, 40)
+        context = self._clear_context()
+
+        self._run_clear(self._clear_update(), context)
+
+        self.assertEqual(
+            {call.kwargs["message_id"] for call in context.bot.delete_message.await_args_list},
+            {20, 30, 9000},
+        )
+        self.assertEqual(set(db.list_deadline_dashboards()), {(OWNER_CHAT_ID, 10), (other_chat, 40)})
+
     def test_clear_uses_database_after_restart_and_includes_dashboard(self) -> None:
         db.save_tracked_message(OWNER_CHAT_ID, 10)
         db.save_tracked_message(OWNER_CHAT_ID, 20)

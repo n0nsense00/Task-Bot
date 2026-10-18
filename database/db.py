@@ -63,14 +63,12 @@ CREATE TABLE IF NOT EXISTS modules (
     name TEXT
 );
 
--- One persistent /deadlines dashboard per chat. chat_id is the PRIMARY KEY so
--- a chat can only ever have one tracked dashboard: registering a newer message
--- replaces the older row rather than accumulating stale ids the scheduler
--- would keep trying to edit forever.
+-- Every sent /deadlines list stays live, including older messages in a chat.
 CREATE TABLE IF NOT EXISTS deadline_dashboards (
-    chat_id     INTEGER PRIMARY KEY,
+    chat_id     INTEGER NOT NULL,
     message_id  INTEGER NOT NULL,
-    updated_at  TEXT    NOT NULL
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
 );
 
 -- Messages that /clear may remove. Unlike the original in-memory tracker,
@@ -214,6 +212,21 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_tasks_chat_due "
         "ON tasks(chat_id, due_date)"
     )
+
+    dashboard_columns = conn.execute("PRAGMA table_info(deadline_dashboards)").fetchall()
+    dashboard_key = [row[1] for row in sorted(dashboard_columns, key=lambda row: row[5]) if row[5]]
+    if dashboard_key == ["chat_id"]:
+        logger.info("Migrating: retaining multiple deadline lists per chat")
+        conn.execute("ALTER TABLE deadline_dashboards RENAME TO deadline_dashboards_legacy")
+        conn.execute("""CREATE TABLE deadline_dashboards (
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (chat_id, message_id)
+        )""")
+        conn.execute("""INSERT INTO deadline_dashboards
+            SELECT chat_id, message_id, updated_at FROM deadline_dashboards_legacy""")
+        conn.execute("DROP TABLE deadline_dashboards_legacy")
 
 
 @contextmanager
@@ -557,52 +570,61 @@ def delete_all_modules() -> int:
 # ---------------------------------------------------------------------------
 # Persistent /deadlines dashboards
 # ---------------------------------------------------------------------------
-# Which Telegram message is the live dashboard for a chat. Persisted (rather
-# than held in memory like TrackingBot's /clear list) so the registration
-# survives a systemd restart and the midnight refresh can find it again.
+# Every live deadline list is persisted so midnight refreshes and restarts
+# update older messages as well as the latest one.
 
 
 def save_deadline_dashboard(chat_id: int, message_id: int) -> None:
-    """Register ``message_id`` as the live dashboard for ``chat_id``.
-
-    Upsert: re-registering a chat replaces its previous message id, so only
-    the newest dashboard is ever refreshed.
-    """
+    """Register a live list without forgetting any other lists in this chat."""
     with _get_conn() as conn:
         conn.execute(
             """INSERT INTO deadline_dashboards (chat_id, message_id, updated_at)
                VALUES (?, ?, ?)
-               ON CONFLICT(chat_id) DO UPDATE SET
-                   message_id = excluded.message_id,
+               ON CONFLICT(chat_id, message_id) DO UPDATE SET
                    updated_at = excluded.updated_at""",
             (chat_id, message_id, datetime.now().isoformat(timespec="seconds")),
         )
 
 
 def get_deadline_dashboard_message_id(chat_id: int) -> Optional[int]:
-    """Return the tracked dashboard message id for ``chat_id``, or ``None``."""
+    """Return the newest tracked list, or ``None`` (legacy caller helper)."""
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT message_id FROM deadline_dashboards WHERE chat_id = ?",
+            "SELECT message_id FROM deadline_dashboards WHERE chat_id = ? "
+            "ORDER BY message_id DESC LIMIT 1",
             (chat_id,),
         ).fetchone()
     return int(row["message_id"]) if row is not None else None
 
 
-def list_deadline_dashboards() -> list[tuple[int, int]]:
-    """Return every tracked ``(chat_id, message_id)`` pair."""
+def list_deadline_dashboards(chat_id: int | None = None) -> list[tuple[int, int]]:
+    """Return tracked pairs, optionally restricted to one chat."""
     with _get_conn() as conn:
+        where = " WHERE chat_id = ?" if chat_id is not None else ""
         rows = conn.execute(
-            "SELECT chat_id, message_id FROM deadline_dashboards ORDER BY chat_id"
+            "SELECT chat_id, message_id FROM deadline_dashboards" + where +
+            " ORDER BY chat_id, message_id",
+            (chat_id,) if chat_id is not None else (),
         ).fetchall()
     return [(int(r["chat_id"]), int(r["message_id"])) for r in rows]
 
 
-def delete_deadline_dashboard(chat_id: int) -> bool:
-    """Forget ``chat_id``'s dashboard. Returns ``True`` if a row was removed."""
+def has_deadline_dashboard(chat_id: int, message_id: int) -> bool:
+    """Return whether this exact message is a registered deadline list."""
     with _get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM deadline_dashboards WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id),
+        ).fetchone() is not None
+
+
+def delete_deadline_dashboard(chat_id: int, message_id: int | None = None) -> bool:
+    """Forget one list, or all lists in a chat when no message id is supplied."""
+    with _get_conn() as conn:
+        where = " AND message_id = ?" if message_id is not None else ""
         cur = conn.execute(
-            "DELETE FROM deadline_dashboards WHERE chat_id = ?", (chat_id,)
+            "DELETE FROM deadline_dashboards WHERE chat_id = ?" + where,
+            (chat_id, message_id) if message_id is not None else (chat_id,),
         )
         return cur.rowcount > 0
 

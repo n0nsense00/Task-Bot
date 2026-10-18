@@ -4,12 +4,10 @@ The bot is intentionally assessment-focused. Timetable views such as /today
 and /week are not registered; the primary view is one chronological list of
 pending semester deadlines.
 
-Every /deadlines sends a fresh list and registers it as the chat's current
-dashboard in SQLite (:func:`database.db.save_deadline_dashboard`). Mutations
-and the daily post-midnight job update the latest registered message via
-:func:`refresh_deadline_dashboard`. Older lists remain chat history. The
-registration is chat-scoped, so the owner's DM and the allowed group each
-track their own dashboard.
+Every /deadlines sends a fresh list and retains its registration in SQLite.
+Mutations and the daily post-midnight job refresh every registered list,
+including older messages. Registrations are chat-scoped, so the owner's DM
+and the allowed group each show their own deadlines.
 """
 from __future__ import annotations
 
@@ -20,12 +18,12 @@ from enum import Enum, auto
 
 from telegram import InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from database.db import (
     delete_deadline_dashboard,
-    get_deadline_dashboard_message_id,
+    has_deadline_dashboard,
     get_semester_deadlines,
     get_task,
     list_deadline_dashboards,
@@ -218,8 +216,8 @@ def _dashboard_lock(chat_id: int) -> asyncio.Lock:
 
 
 def is_tracked_deadline_dashboard(chat_id: int, message_id: int) -> bool:
-    """Return ``True`` if ``message_id`` is the live dashboard for ``chat_id``."""
-    return get_deadline_dashboard_message_id(chat_id) == message_id
+    """Return whether this message is one of the chat's live deadline lists."""
+    return has_deadline_dashboard(chat_id, message_id)
 
 
 def _is_not_modified(exc: BadRequest) -> bool:
@@ -236,7 +234,7 @@ def _is_unrecoverable(exc: BadRequest) -> bool:
 async def refresh_deadline_dashboard(
     application: Application, chat_id: int
 ) -> DashboardRefreshResult:
-    """Re-render ``chat_id``'s tracked dashboard and edit it in place.
+    """Re-render every tracked deadline list in ``chat_id`` in place.
 
     Returns an explicit result so callers never confuse a rejected edit with a
     successful refresh. Temporary failures retain the registration for retry.
@@ -265,55 +263,71 @@ async def _refresh_dashboard(
 ) -> DashboardRefreshResult:
     """Locked refresh body. See :func:`refresh_deadline_dashboard`."""
     async with _dashboard_lock(chat_id):
-        message_id = get_deadline_dashboard_message_id(chat_id)
-        if message_id is None:
+        registrations = list_deadline_dashboards(chat_id)
+        if not registrations:
             return DashboardRefreshResult.NOT_REGISTERED
 
         text, keyboard = render_deadlines(chat_id)
-        try:
-            await application.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard,
-            )
-            return DashboardRefreshResult.UPDATED
-        except BadRequest as exc:
-            if _is_not_modified(exc):
-                # Already showing exactly this. Keep the registration.
-                return DashboardRefreshResult.UNCHANGED
-            if _is_unrecoverable(exc):
-                logger.info(
-                    "Dashboard message %s in chat %s is gone (%s) — "
-                    "dropping registration",
-                    message_id,
-                    chat_id,
-                    exc,
+        updated = unchanged = failed = False
+        for index, (_, message_id) in enumerate(registrations):
+            if index:
+                # Pace batches conservatively for Telegram's per-chat limits.
+                await asyncio.sleep(3.1 if chat_id < 0 else 1.1)
+            # /clear may have removed a message while the batch was waiting.
+            if not has_deadline_dashboard(chat_id, message_id):
+                continue
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+                updated = True
+            except BadRequest as exc:
+                if _is_not_modified(exc):
+                    unchanged = True
+                elif _is_unrecoverable(exc):
+                    logger.info(
+                        "Dashboard message %s in chat %s is gone (%s) — "
+                        "dropping registration", message_id, chat_id, exc,
+                    )
+                    delete_deadline_dashboard(chat_id, message_id)
+                else:
+                    failed = True
+                    logger.warning(
+                        "Dashboard %s refresh rejected for chat %s: %s",
+                        message_id, chat_id, exc,
+                    )
+            except Forbidden as exc:
+                logger.warning(
+                    "Lost access to chat %s (%s) — dropping dashboard registrations",
+                    chat_id, exc,
                 )
                 delete_deadline_dashboard(chat_id)
                 return DashboardRefreshResult.GONE
-            # Some other BadRequest (malformed markup, entity problem...).
-            # Keep the row so a later refresh can retry.
-            logger.warning(
-                "Dashboard refresh rejected for chat %s: %s", chat_id, exc
-            )
+            except RetryAfter as exc:
+                # Keep all unfinished registrations, and stop this batch when
+                # Telegram asks us to back off instead of flooding it further.
+                logger.warning("Dashboard refresh rate limited for chat %s: %s", chat_id, exc)
+                return DashboardRefreshResult.TRANSIENT_FAILURE
+            except TelegramError as exc:
+                failed = True
+                logger.warning(
+                    "Transient Telegram error refreshing message %s in chat %s: %s",
+                    message_id, chat_id, exc,
+                )
+            except Exception:
+                failed = True
+                logger.exception("Unexpected failure refreshing message %s in chat %s", message_id, chat_id)
+        if failed:
             return DashboardRefreshResult.TRANSIENT_FAILURE
-        except Forbidden as exc:
-            logger.warning(
-                "Lost access to chat %s (%s) — dropping dashboard registration",
-                chat_id,
-                exc,
-            )
-            delete_deadline_dashboard(chat_id)
-            return DashboardRefreshResult.GONE
-        except TelegramError as exc:
-            # Timeout, network blip, flood limit: potentially temporary, so the
-            # registration stays and the next refresh retries.
-            logger.warning(
-                "Transient Telegram error refreshing chat %s: %s", chat_id, exc
-            )
-            return DashboardRefreshResult.TRANSIENT_FAILURE
+        if updated:
+            return DashboardRefreshResult.UPDATED
+        if unchanged:
+            return DashboardRefreshResult.UNCHANGED
+        return DashboardRefreshResult.GONE
 
 
 async def refresh_all_deadline_dashboards(application: Application) -> None:
@@ -331,7 +345,8 @@ async def refresh_all_deadline_dashboards(application: Application) -> None:
     refreshed = 0
     transient_failures = 0
     dropped = 0
-    for chat_id, _message_id in registrations:
+    chat_ids = sorted({chat_id for chat_id, _ in registrations})
+    for chat_id in chat_ids:
         try:
             outcome = await refresh_deadline_dashboard(application, chat_id)
             if outcome in (
@@ -350,21 +365,21 @@ async def refresh_all_deadline_dashboards(application: Application) -> None:
             logger.exception("Unexpected failure refreshing chat %s", chat_id)
 
     logger.info(
-        "Deadline dashboards refreshed: %d ok, %d transient failures, "
-        "%d unavailable (of %d)",
+        "Deadline dashboard chats refreshed: %d ok, %d transient failures, "
+        "%d unavailable (of %d chats, %d lists)",
         refreshed,
         transient_failures,
         dropped,
-        len(registrations),
+        len(chat_ids), len(registrations),
     )
 
 
 async def send_and_register_dashboard(
     message: Message, chat_id: int
 ) -> None:
-    """Send a fresh dashboard as a reply and register it as the live one."""
-    # Serialize replacement with scheduled/mutation refreshes. A refresh of
-    # the old message must finish before the new registration is installed.
+    """Send and register a fresh list while keeping older lists live."""
+    # Serialize sending with scheduled/mutation refreshes so a newly sent
+    # list cannot be overwritten by an earlier, stale render.
     async with _dashboard_lock(chat_id):
         text, keyboard = render_deadlines(chat_id)
         sent = await message.reply_text(
@@ -381,10 +396,10 @@ async def send_and_register_dashboard(
 @authorized_only
 @safe
 async def deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with a fresh list and make it this chat's current dashboard.
+    """Reply with a fresh list and retain it for automatic refreshes.
 
     Each explicit command sends the list at the bottom of the chat. Automatic
-    refreshes continue updating the latest successfully sent list in place.
+    refreshes continue updating all successfully sent lists in place.
     """
     message = update.effective_message
     chat = update.effective_chat

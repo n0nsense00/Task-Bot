@@ -4,7 +4,7 @@ from __future__ import annotations
 from telegram import CallbackQuery, InlineKeyboardMarkup
 from telegram.error import BadRequest
 
-from database.db import get_deadline_dashboard_message_id
+from database.db import has_deadline_dashboard
 
 
 async def show_transient_view(
@@ -29,7 +29,7 @@ async def show_transient_view(
     message_id = message.message_id if message is not None else None
     is_dashboard = (
         message_id is not None
-        and get_deadline_dashboard_message_id(chat_id) == message_id
+        and has_deadline_dashboard(chat_id, message_id)
     )
 
     kwargs = {

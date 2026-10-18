@@ -271,7 +271,7 @@ class DeadlinesLifecycleTests(_WiringTestCase):
             db.list_deadline_dashboards(), [(self.chat_id, sent.message_id)]
         )
 
-    def test_registered_dashboard_is_replaced_with_a_fresh_list(self) -> None:
+    def test_registered_dashboard_does_not_prevent_a_fresh_list(self) -> None:
         """An existing dashboard still produces a full list at the bottom."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 555)
@@ -295,7 +295,7 @@ class DeadlinesLifecycleTests(_WiringTestCase):
             self.sent_messages[0].message_id,
         )
 
-    def test_stale_registration_is_replaced_and_resaved(self) -> None:
+    def test_stale_registration_does_not_prevent_sending(self) -> None:
         """A missing old message cannot prevent sending a fresh list."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 777)
@@ -314,7 +314,7 @@ class DeadlinesLifecycleTests(_WiringTestCase):
         body = self.text_of(message.reply_text)
         self.assertIn(DASHBOARD_HEADER, body)
 
-        # ...and the dead id was swapped out for the new one.
+        # The new list is registered without needing to edit the old one.
         self.assertEqual(len(self.sent_messages), 1)
         sent = self.sent_messages[0]
         self.assertNotEqual(sent.message_id, 777)
@@ -323,8 +323,8 @@ class DeadlinesLifecycleTests(_WiringTestCase):
             sent.message_id,
         )
 
-    def test_repeated_commands_send_lists_and_refresh_targets_the_latest(self) -> None:
-        """Every command sends; subsequent automatic edits target the newest."""
+    def test_repeated_commands_send_lists_and_refresh_targets_every_list(self) -> None:
+        """Every command sends; subsequent automatic edits keep all lists live."""
         self.seed_task()
         context = self.make_context()
         for _ in range(3):
@@ -339,18 +339,19 @@ class DeadlinesLifecycleTests(_WiringTestCase):
         self.assertEqual(len(self.sent_messages), 3)
         ids = [message.message_id for message in self.sent_messages]
         self.assertEqual(len(set(ids)), 3)
-        self.assertEqual(db.list_deadline_dashboards(), [(self.chat_id, ids[-1])])
-        outcome = asyncio.run(
-            tasks_mod.refresh_deadline_dashboard(context.application, self.chat_id)
-        )
+        self.assertEqual(db.list_deadline_dashboards(), [(self.chat_id, message_id) for message_id in ids])
+        with patch("handlers.tasks.asyncio.sleep", new_callable=AsyncMock):
+            outcome = asyncio.run(
+                tasks_mod.refresh_deadline_dashboard(context.application, self.chat_id)
+            )
         self.assertIs(outcome, tasks_mod.DashboardRefreshResult.UPDATED)
         self.assertEqual(
-            context.application.bot.edit_message_text.await_args.kwargs["message_id"],
-            ids[-1],
+            [call.kwargs["message_id"] for call in context.application.bot.edit_message_text.await_args_list],
+            ids,
         )
 
     def test_failed_send_keeps_existing_registration(self) -> None:
-        """Sending must succeed before replacing the current dashboard id."""
+        """Sending must succeed before adding a new dashboard registration."""
         self.seed_task()
         db.save_deadline_dashboard(self.chat_id, 888)
         message = self.make_message()

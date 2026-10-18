@@ -303,9 +303,6 @@ class DeadlinesCommandTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(
-                tasks, "get_deadline_dashboard_message_id", return_value=99
-            ),
-            patch.object(
                 tasks,
                 "refresh_deadline_dashboard",
                 new=AsyncMock(

@@ -25,7 +25,7 @@ from config import CMD_CLEAR
 from database.db import (
     delete_deadline_dashboard,
     delete_tracked_messages,
-    get_deadline_dashboard_message_id,
+    list_deadline_dashboards,
     list_tracked_messages,
     save_tracked_message,
 )
@@ -190,8 +190,8 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # A dashboard registration may predate the persistent message-tracker
     # migration. Include it explicitly unless its tracked timestamp proves it
     # is already outside Telegram's deletion window.
-    dashboard_id = get_deadline_dashboard_message_id(chat_id)
-    if dashboard_id is not None and dashboard_id not in expired_ids:
+    dashboard_ids = {message_id for _, message_id in list_deadline_dashboards(chat_id)}
+    for dashboard_id in sorted(dashboard_ids - expired_ids):
         dashboard = (chat_id, dashboard_id)
         if dashboard not in seen:
             seen.add(dashboard)
@@ -276,8 +276,8 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Only forget the persistent dashboard if it was ACTUALLY removed. A
     # dashboard Telegram refused to delete (older than 48h) still exists and
     # stays perfectly editable, so its registration must survive.
-    if dashboard_id is not None and dashboard_id in (deleted_ids | gone_ids):
-        delete_deadline_dashboard(chat_id)
+    for dashboard_id in dashboard_ids & (deleted_ids | gone_ids):
+        delete_deadline_dashboard(chat_id, dashboard_id)
         logger.info(
             "Dashboard message %s deleted by /clear — registration dropped",
             dashboard_id,
